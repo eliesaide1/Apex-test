@@ -108,19 +108,25 @@ function AnswersModal({ session, onClose }) {
       <div class="meta">${answered}/${total} answered${data.submitted ? " · submitted" : ""} · generated ${new Date().toLocaleString()}</div>
       ${rows}
       </body></html>`;
-    // Use a hidden iframe (not a pop-up window) so pop-up blockers can't stop it.
+    // Hidden iframe (not a pop-up, so blockers can't stop it). srcdoc + onload
+    // guarantees we only print once the content is fully laid out.
     const iframe = document.createElement("iframe");
+    iframe.setAttribute("aria-hidden", "true");
     iframe.style.cssText = "position:fixed;right:0;bottom:0;width:0;height:0;border:0;";
-    document.body.appendChild(iframe);
-    const doc = iframe.contentWindow.document;
-    doc.open(); doc.write(html); doc.close();
     const done = () => { if (iframe.parentNode) document.body.removeChild(iframe); };
-    iframe.contentWindow.onafterprint = done;
-    setTimeout(() => {
-      iframe.contentWindow.focus();
-      iframe.contentWindow.print();   // opens the print dialog -> choose "Save as PDF"
-      setTimeout(done, 60000);        // safety cleanup if onafterprint never fires
-    }, 250);
+    iframe.onload = () => {
+      try {
+        iframe.contentWindow.onafterprint = done;
+        iframe.contentWindow.focus();
+        iframe.contentWindow.print();   // print dialog -> choose "Save as PDF"
+        setTimeout(done, 120000);       // safety cleanup
+      } catch {
+        done();
+        window.alert("Could not open the print dialog for the PDF.");
+      }
+    };
+    iframe.srcdoc = html;
+    document.body.appendChild(iframe);
   }
 
   return (
