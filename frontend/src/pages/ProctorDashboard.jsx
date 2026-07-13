@@ -1,7 +1,44 @@
 import { useEffect, useRef, useState } from "react";
-import { fetchSessions, snapshotUrl, WS_BASE } from "../api";
+import {
+  fetchSessions, snapshotUrl, proctorWsUrl, proctorLogin,
+  getProctorToken, setProctorToken,
+} from "../api";
 
 const fmtTime = (ts) => new Date(ts * 1000).toLocaleTimeString();
+
+/** Password gate shown until the proctor authenticates. */
+function ProctorLogin({ onAuthed }) {
+  const [pw, setPw] = useState("");
+  const [err, setErr] = useState("");
+  const [busy, setBusy] = useState(false);
+
+  async function submit(e) {
+    e.preventDefault();
+    setErr(""); setBusy(true);
+    try {
+      await proctorLogin(pw);
+      onAuthed();
+    } catch (e) {
+      setErr(e.message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="center">
+      <form className="card" onSubmit={submit}>
+        <h1>Proctor sign-in</h1>
+        <p className="muted">Restricted — live candidate monitoring.</p>
+        <label>Proctor password</label>
+        <input type="password" value={pw} autoFocus
+               onChange={(e) => setPw(e.target.value)} placeholder="••••••••" />
+        {err && <div className="error">{err}</div>}
+        <button disabled={busy || !pw}>{busy ? "Signing in…" : "Sign in"}</button>
+      </form>
+    </div>
+  );
+}
 
 /** Live webcam thumbnail for one candidate — refreshes on a timer. Click to expand. */
 function CameraTile({ session, tick, onExpand }) {
@@ -85,6 +122,7 @@ function Dropoffs({ dropoffs }) {
 }
 
 export default function ProctorDashboard() {
+  const [authed, setAuthed] = useState(!!getProctorToken());
   const [sessions, setSessions] = useState([]);
   const [feed, setFeed] = useState([]);
   const [tick, setTick] = useState(0);   // drives live camera refresh
@@ -94,12 +132,16 @@ export default function ProctorDashboard() {
   const expanded = sessions.find((s) => s.session_id === expandedId) || null;
 
   useEffect(() => {
-    const load = () => fetchSessions().then(setSessions).catch(() => {});
+    if (!authed) return;
+    const load = () =>
+      fetchSessions().then(setSessions).catch((e) => {
+        if (e.message === "unauthorized") setAuthed(false);
+      });
     load();
     const poll = setInterval(load, 3000);          // refresh presence + drop-offs
     const cam = setInterval(() => setTick((t) => t + 1), 2500); // refresh camera frames
 
-    const ws = new WebSocket(`${WS_BASE}/ws/proctor`);
+    const ws = new WebSocket(proctorWsUrl());
     wsRef.current = ws;
     ws.onmessage = (ev) => {
       const msg = JSON.parse(ev.data);
@@ -107,12 +149,16 @@ export default function ProctorDashboard() {
       load();
     };
     return () => { clearInterval(poll); clearInterval(cam); ws.close(); };
-  }, []);
+  }, [authed]);
+
+  if (!authed) return <ProctorLogin onAuthed={() => setAuthed(true)} />;
 
   return (
     <div className="dash">
       <header className="bar"><strong>Proctor dashboard</strong>
         <span className="muted">live · {sessions.filter((s) => s.online).length} online</span>
+        <button className="ghost" style={{ marginLeft: "auto" }}
+          onClick={() => { setProctorToken(""); setAuthed(false); }}>Sign out</button>
       </header>
 
       <div className="cards">

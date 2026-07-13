@@ -1,6 +1,6 @@
-"""Seed exam content. In production this comes from PostgreSQL."""
+"""Seed exam content. In production this comes from a database."""
 
-EXAM_CODE = "DEMO"
+from .config import EXAM_CODE  # noqa: F401  (re-exported for callers)
 
 EXAM = {
     "id": "exam-001",

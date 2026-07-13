@@ -1,0 +1,25 @@
+# Render.com blueprint — one HTTPS web service that builds the frontend and
+# serves it from the FastAPI backend. Deploy: push to GitHub, then in Render
+# "New +" -> "Blueprint" and point it at this repo.
+#
+# HTTPS is provided automatically, which the webcam + fullscreen features require.
+services:
+  - type: web
+    name: apextestportal
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    plan: starter          # a paid plan keeps the disk + avoids cold-start sleeps
+    healthCheckPath: /api/health
+    disk:
+      name: data
+      mountPath: /var/data # matches DB_PATH so SQLite survives redeploys
+      sizeGB: 1
+    envVars:
+      - key: SECRET_KEY
+        generateValue: true          # random, used to sign auth tokens
+      - key: PROCTOR_PASSWORD
+        sync: false                  # set in the Render dashboard (secret)
+      - key: EXAM_CODE
+        value: DEMO                  # change to your real code
+      - key: DB_PATH
+        value: /var/data/apex.db

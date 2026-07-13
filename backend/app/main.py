@@ -1,23 +1,40 @@
 """ApexTestPortal backend — FastAPI.
 
-Endpoints:
-    POST /api/login              -> start a session, get the exam (no answer keys)
+Candidate endpoints (require a candidate bearer token, issued at /api/login and
+scoped to that one session):
+    POST /api/login              -> start a session; returns token + exam (no keys)
     POST /api/flag               -> record a cheating flag; broadcast to proctors
     POST /api/snapshot           -> upload webcam frame; AI-analyze; flag if needed
     POST /api/submit             -> grade the exam
-    GET  /api/sessions           -> proctor: list sessions + flags
-    WS   /ws/proctor             -> proctor: live stream of flags
+    POST /api/heartbeat          -> liveness ping
+
+Proctor endpoints (require a proctor bearer token, issued at /api/proctor/login):
+    GET  /api/sessions           -> list sessions + flags
+    GET  /api/snapshot/{id}      -> latest webcam frame
+    WS   /ws/proctor?token=...   -> live stream of flags
+
+The built frontend is served from FRONTEND_DIST so the whole app is one origin.
 """
 from __future__ import annotations
 
 import asyncio
 import json
+import os
 import time
 
-from fastapi import FastAPI, UploadFile, File, Form, WebSocket, WebSocketDisconnect
+from fastapi import (
+    FastAPI, UploadFile, File, Form, WebSocket, WebSocketDisconnect,
+    Depends, Header, HTTPException,
+)
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse, Response
+from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel
 
-from . import store, exam_data
+from . import store, exam_data, config, db
+from .auth import (
+    make_token, verify_token, require_proctor, require_candidate,
+)
 from .models import (
     LoginRequest, LoginResponse, FlagRequest, SubmitRequest, SubmitResponse,
 )
@@ -25,12 +42,18 @@ from .proctoring import analyze_snapshot
 
 app = FastAPI(title="ApexTestPortal")
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],   # tighten to your frontend origin in production
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+if config.ALLOWED_ORIGINS:
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=config.ALLOWED_ORIGINS,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
+
+
+@app.on_event("startup")
+def _startup() -> None:
+    db.init()
 
 
 # --------------------------------------------------------------------------- #
@@ -74,44 +97,69 @@ def _flag_event(session: store.Session, flag: store.Flag) -> dict:
     }
 
 
+def _require_own_session(token: dict, session_id: str) -> None:
+    """A candidate token may only act on the session it was issued for."""
+    if token.get("sub") != session_id:
+        raise HTTPException(status_code=403, detail="Token/session mismatch")
+
+
+# --------------------------------------------------------------------------- #
+# Auth
+# --------------------------------------------------------------------------- #
+class ProctorLogin(BaseModel):
+    password: str
+
+
+@app.post("/api/proctor/login")
+async def proctor_login(req: ProctorLogin):
+    import hmac
+    if not hmac.compare_digest(req.password, config.PROCTOR_PASSWORD):
+        raise HTTPException(status_code=403, detail="Invalid proctor password")
+    return {"token": make_token("proctor", "proctor", config.PROCTOR_TOKEN_TTL)}
+
+
 # --------------------------------------------------------------------------- #
 # Candidate endpoints
 # --------------------------------------------------------------------------- #
 @app.post("/api/login", response_model=LoginResponse)
 async def login(req: LoginRequest):
     if req.exam_code.strip().upper() != exam_data.EXAM_CODE:
-        from fastapi import HTTPException
         raise HTTPException(status_code=403, detail="Invalid exam code")
     if not req.name.strip():
-        from fastapi import HTTPException
         raise HTTPException(status_code=400, detail="Name required")
 
     session = store.create_session(req.name.strip(), exam_data.EXAM["id"])
+    token = make_token("candidate", session.id, config.CANDIDATE_TOKEN_TTL)
     return LoginResponse(
         session_id=session.id,
         candidate_name=session.candidate_name,
+        token=token,
         exam=exam_data.public_exam(),
     )
 
 
 @app.post("/api/flag")
-async def flag(req: FlagRequest):
+async def flag(req: FlagRequest, token: dict = Depends(require_candidate)):
+    _require_own_session(token, req.session_id)
     session = store.add_flag(
         req.session_id,
         store.Flag(type=req.type, detail=req.detail, severity=req.severity),
     )
     if session is None:
-        from fastapi import HTTPException
         raise HTTPException(status_code=404, detail="Unknown session")
     await hub.broadcast(_flag_event(session, session.flags[-1]))
     return {"ok": True, "total_flags": len(session.flags)}
 
 
 @app.post("/api/snapshot")
-async def snapshot(session_id: str = Form(...), image: UploadFile = File(...)):
+async def snapshot(
+    session_id: str = Form(...),
+    image: UploadFile = File(...),
+    token: dict = Depends(require_candidate),
+):
+    _require_own_session(token, session_id)
     session = store.get_session(session_id)
     if session is None:
-        from fastapi import HTTPException
         raise HTTPException(status_code=404, detail="Unknown session")
 
     data = await image.read()
@@ -123,22 +171,21 @@ async def snapshot(session_id: str = Form(...), image: UploadFile = File(...)):
             type=det["type"], detail=det.get("detail"),
             severity=det.get("severity", "high"),
         )
-        store.add_flag(session_id, f)
+        session = store.add_flag(session_id, f) or session
         await hub.broadcast(_flag_event(session, f))
 
     return {"ok": True, "detections": detections}
 
 
 @app.post("/api/submit", response_model=SubmitResponse)
-async def submit(req: SubmitRequest):
+async def submit(req: SubmitRequest, token: dict = Depends(require_candidate)):
+    _require_own_session(token, req.session_id)
     session = store.get_session(req.session_id)
     if session is None:
-        from fastapi import HTTPException
         raise HTTPException(status_code=404, detail="Unknown session")
 
     score, total = exam_data.grade(req.answers)
-    session.submitted = True
-    session.score = score
+    session = store.set_submitted(req.session_id, score) or session
     await hub.broadcast({
         "kind": "submit", "session_id": session.id,
         "candidate_name": session.candidate_name,
@@ -148,8 +195,12 @@ async def submit(req: SubmitRequest):
 
 
 @app.post("/api/heartbeat")
-async def heartbeat(session_id: str = Form(...)):
+async def heartbeat(
+    session_id: str = Form(...),
+    token: dict = Depends(require_candidate),
+):
     """Candidate pings this every few seconds. Absence => 'dropped off'."""
+    _require_own_session(token, session_id)
     s = store.touch(session_id)
     return {"ok": s is not None}
 
@@ -161,7 +212,7 @@ ONLINE_WINDOW = 12   # seconds without a heartbeat before we call them "dropped"
 
 
 @app.get("/api/sessions")
-async def sessions():
+async def sessions(_: dict = Depends(require_proctor)):
     now = time.time()
     out = []
     for s in store.all_sessions():
@@ -194,8 +245,12 @@ async def sessions():
 
 
 @app.get("/api/snapshot/{session_id}")
-async def get_snapshot(session_id: str):
-    from fastapi import Response, HTTPException
+async def get_snapshot(session_id: str, token: str | None = None):
+    # Loaded via <img src>, which can't set an Authorization header, so the
+    # proctor token arrives as a query param and is verified here.
+    payload = verify_token(token or "")
+    if payload.get("role") != "proctor":
+        raise HTTPException(status_code=403, detail="Proctor role required")
     s = store.get_session(session_id)
     if s is None or s.last_snapshot is None:
         raise HTTPException(status_code=404, detail="No frame yet")
@@ -204,7 +259,17 @@ async def get_snapshot(session_id: str):
 
 
 @app.websocket("/ws/proctor")
-async def ws_proctor(ws: WebSocket):
+async def ws_proctor(ws: WebSocket, token: str | None = None):
+    # WebSockets can't send Authorization headers from the browser, so the
+    # proctor token arrives as a query param: /ws/proctor?token=...
+    try:
+        payload = verify_token(token or "")
+        if payload.get("role") != "proctor":
+            raise HTTPException(status_code=403, detail="Proctor role required")
+    except HTTPException:
+        await ws.close(code=1008)   # policy violation
+        return
+
     await hub.connect(ws)
     try:
         while True:
@@ -216,3 +281,24 @@ async def ws_proctor(ws: WebSocket):
 @app.get("/api/health")
 async def health():
     return {"status": "ok"}
+
+
+# --------------------------------------------------------------------------- #
+# Serve the built frontend (single-origin deploy). Registered LAST so it never
+# shadows the API routes above.
+# --------------------------------------------------------------------------- #
+if config.FRONTEND_DIST and os.path.isdir(config.FRONTEND_DIST):
+    _dist = config.FRONTEND_DIST
+    _assets = os.path.join(_dist, "assets")
+    if os.path.isdir(_assets):
+        app.mount("/assets", StaticFiles(directory=_assets), name="assets")
+
+    @app.get("/{full_path:path}")
+    async def spa(full_path: str):
+        # Never let the SPA fallback answer API/WS paths.
+        if full_path.startswith(("api/", "ws/")):
+            raise HTTPException(status_code=404, detail="Not found")
+        candidate = os.path.join(_dist, full_path)
+        if full_path and os.path.isfile(candidate):
+            return FileResponse(candidate)
+        return FileResponse(os.path.join(_dist, "index.html"))
