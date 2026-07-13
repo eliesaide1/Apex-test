@@ -114,6 +114,7 @@ button:disabled { opacity: .5; cursor: not-allowed; }
 .progress-meta { display: flex; justify-content: space-between; align-items: center;
   font-size: 12px; color: var(--muted); margin-top: 6px; }
 .q-timer { font-variant-numeric: tabular-nums; }
+.q-timer.low { color: var(--high); font-weight: 700; }
 
 .slide { background: var(--panel); border: 1px solid var(--line); border-radius: 14px;
   padding: 24px; }
@@ -229,7 +230,9 @@ button:disabled { opacity: .5; cursor: not-allowed; }
   left: 0; right: 0; background: rgba(0,0,0,.5); z-index: 2; }
 .modal:fullscreen .modal-head { top: 0; } .modal:fullscreen .modal-foot { bottom: 0; }
 
-.view-answers { margin-top: 10px; width: 100%; font-size: 13px; }
+.card-actions { display: flex; gap: 8px; margin-top: 10px; }
+.card-actions .ghost { flex: 1; margin-top: 0; font-size: 13px; }
+.remove-btn:hover { border-color: var(--high); color: var(--high); }
 
 /* answers modal */
 .answers-modal { width: min(820px, 96vw); }

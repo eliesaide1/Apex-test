@@ -20,7 +20,7 @@ SECRET_KEY: str = _get("SECRET_KEY", "dev-insecure-change-me")
 PROCTOR_PASSWORD: str = _get("PROCTOR_PASSWORD", "proctor")
 
 # Code candidates enter to start the exam.
-EXAM_CODE: str = _get("EXAM_CODE", "DEMO").strip().upper()
+EXAM_CODE: str = _get("EXAM_CODE", "APEX-TEST").strip().upper()
 
 # SQLite file location. On managed platforms point this at a mounted disk so it
 # survives redeploys, e.g. /var/data/apex.db.

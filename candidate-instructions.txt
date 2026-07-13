@@ -1,0 +1,53 @@
+Apex AI — Backend Technical Assessment
+Candidate Instructions
+=======================================
+
+Hi [Candidate Name],
+
+Thank you for taking the time to complete the Apex AI Backend Technical
+Assessment. Please read the short note below before you begin — there is nothing
+to worry about; it is a straightforward, proctored online exam.
+
+--------------------------------------------------------------------
+READY-TO-SEND PARAGRAPH (copy/paste to the candidate)
+--------------------------------------------------------------------
+
+Hello [Candidate Name],
+
+You are invited to complete the Apex AI Backend Technical Assessment. When you are
+ready, please open the following link in Google Chrome (on a laptop or desktop, not
+a phone): https://apextestportal.onrender.com
+
+To begin, simply enter your full name and the access code APEX-TEST, then click
+"Start exam". There is no password to remember — your name and that code are all you
+need. When your browser asks for permission, please allow access to your camera and
+microphone: both are required for the exam to appear and must stay on for the entire
+session, as the assessment is proctored. The exam will also open in full-screen mode.
+
+The assessment contains 19 written questions across five sections and lasts 90 minutes
+in total. Each question has its own time limit shown on screen, and it will move to the
+next question automatically when that time runs out, so please pace yourself. After you
+answer a question you click "Save & next" to move forward — note that you cannot return
+to a previous question once you have moved on. Copying, pasting, and screenshots are
+disabled during the exam. Take your time, stay calm, and answer as clearly and precisely
+as you can. Good luck!
+
+Best regards,
+The Apex AI Team
+
+--------------------------------------------------------------------
+QUICK REFERENCE
+--------------------------------------------------------------------
+
+  Exam link : https://apextestportal.onrender.com
+  Login     : Full name + access code  APEX-TEST   (no password)
+  Requires  : Working camera AND microphone (allow when prompted)
+  Browser   : Google Chrome on a laptop/desktop, stable internet
+  Duration  : 90 minutes total; each question is individually timed
+  Format    : 19 written questions, one per screen, forward-only
+  Note      : Runs full-screen; copy/paste and screenshots are blocked;
+              turning the camera or microphone off hides the questions
+              until both are switched back on.
+
+Tip: The first time the link is opened it may take up to a minute to load while the
+server wakes up — this is normal, just wait for the login screen to appear.

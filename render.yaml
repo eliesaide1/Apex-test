@@ -22,4 +22,4 @@ services:
       - key: PROCTOR_PASSWORD
         sync: false                  # set in the Render dashboard (secret)
       - key: EXAM_CODE
-        value: DEMO                  # change to your real code
+        value: APEX-TEST             # code candidates enter to start

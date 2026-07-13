@@ -5,7 +5,7 @@ import { enterFullscreen } from "../hooks/useProctoring";
 
 export default function Login() {
   const [name, setName] = useState("");
-  const [code, setCode] = useState("DEMO");
+  const [code, setCode] = useState("APEX-TEST");
   const [err, setErr] = useState("");
   const [busy, setBusy] = useState(false);
   const nav = useNavigate();
@@ -38,7 +38,7 @@ export default function Login() {
 
         <label>Exam code</label>
         <input value={code} onChange={(e) => setCode(e.target.value)}
-               placeholder="DEMO" />
+               placeholder="APEX-TEST" />
 
         {err && <div className="error">{err}</div>}
 

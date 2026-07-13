@@ -152,6 +152,13 @@ def get_answers(session_id: str) -> dict[str, dict]:
             for r in rows}
 
 
+def delete_session(session_id: str) -> bool:
+    """Remove a session and (via FK cascade) its flags and answers."""
+    _snapshots.pop(session_id, None)
+    cur = db.execute("DELETE FROM sessions WHERE id=?", (session_id,))
+    return cur.rowcount > 0
+
+
 def count_answers(session_id: str) -> int:
     row = db.query_one(
         "SELECT COUNT(*) AS n FROM answers WHERE session_id=? AND TRIM(answer) <> ''",

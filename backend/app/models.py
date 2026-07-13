@@ -14,6 +14,7 @@ class QuestionPublic(BaseModel):
     id: str
     text: str
     points: int
+    time_limit_seconds: int
 
 
 class SectionPublic(BaseModel):

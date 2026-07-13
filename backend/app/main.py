@@ -262,6 +262,14 @@ async def sessions(_: dict = Depends(require_proctor)):
     return out
 
 
+@app.delete("/api/sessions/{session_id}")
+async def delete_session(session_id: str, _: dict = Depends(require_proctor)):
+    """Proctor: remove a candidate (and their flags, answers, camera frame)."""
+    if not store.delete_session(session_id):
+        raise HTTPException(status_code=404, detail="Unknown session")
+    return {"ok": True}
+
+
 @app.get("/api/answers/{session_id}")
 async def answers_for(session_id: str, _: dict = Depends(require_proctor)):
     """Proctor: read a candidate's saved free-text answers, joined to questions."""

@@ -9,6 +9,17 @@ In production this would come from a database.
 
 from .config import EXAM_CODE  # noqa: F401  (re-exported for callers)
 
+# Per-question countdown (seconds), hand-tuned by difficulty / expected writing
+# effort rather than strictly by points. The values sum to 5400 = 90 minutes,
+# which is also the overall exam duration.
+QUESTION_TIME = {
+    "q1": 180, "q2": 240, "q3": 180, "q4": 240, "q5": 210,      # Section A
+    "q6": 720, "q7": 240, "q8": 300, "q9": 240,                 # Section B
+    "q10": 540, "q11": 300, "q12": 240,                         # Section C
+    "q13": 240, "q14": 270, "q15": 240,                         # Section D
+    "q16": 300, "q17": 240, "q18": 240, "q19": 240,             # Section E
+}
+
 EXAM = {
     "id": "be-tech-001",
     "title": "Apex AI — Backend Technical Assessment",
@@ -193,7 +204,7 @@ def public_exam() -> dict:
     return {
         "id": EXAM["id"],
         "title": EXAM["title"],
-        "duration_seconds": EXAM["duration_seconds"],
+        "duration_seconds": sum(QUESTION_TIME.values()),  # = 5400s (90 min)
         "total_points": EXAM["total_points"],
         "instructions": EXAM["instructions"],
         "org": EXAM["org"],
@@ -206,7 +217,8 @@ def public_exam() -> dict:
                 "instructions": s.get("instructions", ""),
                 "scenario": s.get("scenario"),
                 "questions": [
-                    {"id": q["id"], "text": q["text"], "points": q["points"]}
+                    {"id": q["id"], "text": q["text"], "points": q["points"],
+                     "time_limit_seconds": QUESTION_TIME[q["id"]]}
                     for q in s["questions"]
                 ],
             }

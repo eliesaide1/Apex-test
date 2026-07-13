@@ -125,6 +125,16 @@ export async function fetchSessions() {
   return r.json();
 }
 
+// Proctor: permanently remove a candidate (session, flags, answers, frame).
+export async function deleteSession(sessionId) {
+  const r = await fetch(`${BASE}/api/sessions/${sessionId}`, {
+    method: "DELETE",
+    headers: { Authorization: `Bearer ${getProctorToken()}` },
+  });
+  if (!r.ok) throw new Error("Delete failed");
+  return r.json();
+}
+
 // Proctor: fetch a candidate's saved answers joined to the questions.
 export async function fetchAnswers(sessionId) {
   const r = await fetch(`${BASE}/api/answers/${sessionId}`, {

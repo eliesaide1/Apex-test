@@ -32,10 +32,11 @@ export default function Exam() {
   const [answers, setAnswers] = useState({});
   const [idx, setIdx] = useState(0);                 // current slide
   const [timeLeft, setTimeLeft] = useState(session?.exam?.duration_seconds ?? 0);
-  const [qElapsed, setQElapsed] = useState(0);       // seconds on the current question
+  const [qLeft, setQLeft] = useState(0);             // seconds left on the current question
   const [pendingSkip, setPendingSkip] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [saving, setSaving] = useState(false);
+  const advanceRef = useRef(null);                   // latest advance() for the timer
 
   const total = flat.length;
   const current = flat[idx];
@@ -86,13 +87,20 @@ export default function Exam() {
     return () => clearInterval(id);
   }, [session, doSubmit]);
 
-  // Per-question stopwatch — resets each time we move to a new slide.
+  // Per-question countdown — resets each slide; auto-advances when it hits zero
+  // (an unanswered question is then forfeited).
   useEffect(() => {
-    setQElapsed(0);
+    if (!current) return;
+    setQLeft(current.time_limit_seconds);
     setPendingSkip(false);
-    const id = setInterval(() => setQElapsed((e) => e + 1), 1000);
+    const id = setInterval(() => {
+      setQLeft((t) => {
+        if (t <= 1) { clearInterval(id); advanceRef.current?.(); return 0; }
+        return t - 1;
+      });
+    }, 1000);
     return () => clearInterval(id);
-  }, [idx]);
+  }, [idx]);   // eslint-disable-line react-hooks/exhaustive-deps
 
   if (!session) {
     return <div className="center"><div className="card">
@@ -124,6 +132,9 @@ export default function Exam() {
     if (!answered && !pendingSkip) { setPendingSkip(true); return; }  // ask once
     advance();
   }
+
+  // The countdown fires advanceRef.current() — keep it pointing at the latest closure.
+  advanceRef.current = advance;
 
   const answered = (answers[current.id] ?? "").trim().length > 0;
   const primaryLabel = submitting || saving ? "Saving…"
@@ -188,7 +199,9 @@ export default function Exam() {
             </div>
             <div className="progress-meta">
               <span>Question {idx + 1} of {total} · {answeredCount} answered</span>
-              <span className="q-timer" title="Time on this question">🕐 {mmss(qElapsed)} on this question</span>
+              <span className={`q-timer ${qLeft <= 30 ? "low" : ""}`} title="Time left on this question">
+                ⏳ {mmss(qLeft)} left on this question
+              </span>
             </div>
           </div>
 

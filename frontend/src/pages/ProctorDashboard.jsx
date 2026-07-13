@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import {
-  fetchSessions, fetchAnswers, snapshotUrl, proctorWsUrl, proctorLogin,
-  getProctorToken, setProctorToken,
+  fetchSessions, fetchAnswers, deleteSession, snapshotUrl, proctorWsUrl,
+  proctorLogin, getProctorToken, setProctorToken,
 } from "../api";
 
 const fmtTime = (ts) => new Date(ts * 1000).toLocaleTimeString();
@@ -24,6 +24,40 @@ function AnswersModal({ session, onClose }) {
   const answered = data?.items.filter((i) => i.answer.trim()).length ?? 0;
   const total = data?.items.length ?? 0;
 
+  function downloadPdf() {
+    if (!data) return;
+    const esc = (s) => String(s).replace(/[&<>]/g,
+      (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c]));
+    const rows = data.items.map((it, i) => `
+      <div class="q">
+        <div class="qh">Q${i + 1} · Section ${esc(it.section)} · ${it.points} pt${it.points > 1 ? "s" : ""}</div>
+        <div class="qt">${esc(it.text)}</div>
+        <div class="a ${it.answer.trim() ? "" : "empty"}">${it.answer.trim() ? esc(it.answer) : "— no answer —"}</div>
+      </div>`).join("");
+    const html = `<!doctype html><html><head><meta charset="utf-8">
+      <title>${esc(data.candidate_name)} — Apex AI Assessment</title>
+      <style>
+        body{font:13px/1.5 system-ui,Arial,sans-serif;color:#111;margin:32px;}
+        h1{font-size:18px;margin:0 0 2px;} h2{font-size:15px;margin:0 0 2px;}
+        .meta{color:#555;margin-bottom:18px;font-size:12px;}
+        .q{margin-bottom:16px;page-break-inside:avoid;}
+        .qh{font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:#666;}
+        .qt{font-weight:600;white-space:pre-wrap;margin:2px 0 6px;}
+        .a{white-space:pre-wrap;border:1px solid #ccc;border-radius:6px;padding:8px 10px;background:#fafafa;}
+        .a.empty{color:#999;font-style:italic;}
+      </style></head><body>
+      <h1>Apex AI — Backend Technical Assessment</h1>
+      <h2>${esc(data.candidate_name)}</h2>
+      <div class="meta">${answered}/${total} answered${data.submitted ? " · submitted" : ""} · generated ${new Date().toLocaleString()}</div>
+      ${rows}
+      <script>window.onload=function(){window.print();}<\/script>
+      </body></html>`;
+    const w = window.open("", "_blank");
+    if (!w) { alert("Allow pop-ups for this site to download the PDF."); return; }
+    w.document.write(html);
+    w.document.close();
+  }
+
   return (
     <div className="modal-backdrop" onClick={onClose}>
       <div className="modal answers-modal" onClick={(e) => e.stopPropagation()}>
@@ -33,7 +67,10 @@ function AnswersModal({ session, onClose }) {
             <span className="muted"> · {answered}/{total} answered
               {data?.submitted ? " · submitted" : ""}</span>
           </div>
-          <button className="ghost" onClick={onClose}>✕ Close</button>
+          <div className="modal-actions">
+            <button className="ghost" onClick={downloadPdf} disabled={!data}>⬇ Download PDF</button>
+            <button className="ghost" onClick={onClose}>✕ Close</button>
+          </div>
         </div>
         <div className="answers-body">
           {err && <div className="error">{err}</div>}
@@ -183,6 +220,18 @@ export default function ProctorDashboard() {
   const expanded = sessions.find((s) => s.session_id === expandedId) || null;
   const answersSession = sessions.find((s) => s.session_id === answersId) || null;
 
+  async function removeCandidate(s) {
+    if (!window.confirm(
+      `Remove ${s.candidate_name}? This permanently deletes their answers, ` +
+      `flags, and camera frame.`)) return;
+    try {
+      await deleteSession(s.session_id);
+      setSessions((prev) => prev.filter((x) => x.session_id !== s.session_id));
+      if (answersId === s.session_id) setAnswersId(null);
+      if (expandedId === s.session_id) setExpandedId(null);
+    } catch { /* ignore */ }
+  }
+
   useEffect(() => {
     if (!authed) return;
     const load = () =>
@@ -243,10 +292,16 @@ export default function ProctorDashboard() {
                   <span>Last seen: {fmtTime(s.last_seen)}</span>
                 </div>
 
-                <button className="ghost view-answers"
-                        onClick={() => setAnswersId(s.session_id)}>
-                  📄 View answers
-                </button>
+                <div className="card-actions">
+                  <button className="ghost view-answers"
+                          onClick={() => setAnswersId(s.session_id)}>
+                    📄 View answers
+                  </button>
+                  <button className="ghost remove-btn"
+                          onClick={() => removeCandidate(s)}>
+                    ✕ Remove
+                  </button>
+                </div>
 
                 <div className="do-title">Drop-off timeline</div>
                 <Dropoffs dropoffs={s.dropoffs} />
