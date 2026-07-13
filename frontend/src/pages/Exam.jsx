@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { submit, saveAnswer, sendFlag } from "../api";
+import { submit, saveAnswer, sendFlag, fetchMessages } from "../api";
 import { useProctoring, enterFullscreen } from "../hooks/useProctoring";
 import { useWebcam } from "../hooks/useWebcam";
 import Watermark from "../components/Watermark.jsx";
@@ -36,6 +36,7 @@ export default function Exam() {
   const [pendingSkip, setPendingSkip] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [saving, setSaving] = useState(false);
+  const [msgQueue, setMsgQueue] = useState([]);      // proctor messages awaiting OK
   const advanceRef = useRef(null);                   // latest advance() for the timer
 
   const total = flat.length;
@@ -73,6 +74,16 @@ export default function Exam() {
     else if (!prevMic.current && micOn) sendFlag(sid, "mic_on", "Microphone restored", "low");
     prevMic.current = micOn;
   }, [micOn, micStatus, sid]);
+
+  // Poll for proctor messages -> queue them as popups.
+  useEffect(() => {
+    if (!sid) return;
+    const id = setInterval(async () => {
+      const { messages } = await fetchMessages(sid);
+      if (messages && messages.length) setMsgQueue((q) => [...q, ...messages]);
+    }, 4000);
+    return () => clearInterval(id);
+  }, [sid]);
 
   // Master countdown from the full duration -> auto-submit at zero. Runs
   // continuously, so time spent on every question is drawn from the same pool.
@@ -145,6 +156,16 @@ export default function Exam() {
   return (
     <div className="exam">
       <Watermark text={`${candidateName(session)} · ${sid.slice(0, 8)}`} />
+
+      {msgQueue.length > 0 && (
+        <div className="modal-backdrop msg-pop">
+          <div className="msg-card">
+            <div className="msg-title">✉ Message from proctor</div>
+            <div className="msg-text">{msgQueue[0].text}</div>
+            <button onClick={() => setMsgQueue((q) => q.slice(1))}>OK</button>
+          </div>
+        </div>
+      )}
 
       <header className="bar">
         <strong>{session.exam.title}</strong>

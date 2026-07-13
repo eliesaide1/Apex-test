@@ -36,7 +36,7 @@ from .auth import (
     make_token, verify_token, require_proctor, require_candidate,
 )
 from .models import (
-    LoginRequest, LoginResponse, FlagRequest, AnswerRequest,
+    LoginRequest, LoginResponse, FlagRequest, AnswerRequest, MessageRequest,
     SubmitRequest, SubmitResponse,
 )
 from .proctoring import analyze_snapshot
@@ -210,6 +210,13 @@ async def submit(req: SubmitRequest, token: dict = Depends(require_candidate)):
     return SubmitResponse(answered=answered, total=total, flags=len(session.flags))
 
 
+@app.get("/api/messages/{session_id}")
+async def get_messages(session_id: str, token: dict = Depends(require_candidate)):
+    """Candidate polls this; returns and clears any proctor messages."""
+    _require_own_session(token, session_id)
+    return {"messages": store.pop_messages(session_id)}
+
+
 @app.post("/api/heartbeat")
 async def heartbeat(
     session_id: str = Form(...),
@@ -260,6 +267,16 @@ async def sessions(_: dict = Depends(require_proctor)):
             ],
         })
     return out
+
+
+@app.post("/api/message")
+async def send_message(req: MessageRequest, _: dict = Depends(require_proctor)):
+    """Proctor sends a message that pops up on the candidate's screen."""
+    if not req.text.strip():
+        raise HTTPException(status_code=400, detail="Empty message")
+    if not store.add_message(req.session_id, req.text.strip()):
+        raise HTTPException(status_code=404, detail="Unknown session")
+    return {"ok": True}
 
 
 @app.delete("/api/sessions/{session_id}")

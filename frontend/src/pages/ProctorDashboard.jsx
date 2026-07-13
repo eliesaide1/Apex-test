@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import {
-  fetchSessions, fetchAnswers, deleteSession, snapshotUrl, proctorWsUrl,
-  proctorLogin, getProctorToken, setProctorToken,
+  fetchSessions, fetchAnswers, deleteSession, sendCandidateMessage,
+  snapshotUrl, proctorWsUrl, proctorLogin, getProctorToken, setProctorToken,
 } from "../api";
 
 const fmtTime = (ts) => new Date(ts * 1000).toLocaleTimeString();
@@ -50,12 +50,20 @@ function AnswersModal({ session, onClose }) {
       <h2>${esc(data.candidate_name)}</h2>
       <div class="meta">${answered}/${total} answered${data.submitted ? " · submitted" : ""} · generated ${new Date().toLocaleString()}</div>
       ${rows}
-      <script>window.onload=function(){window.print();}<\/script>
       </body></html>`;
-    const w = window.open("", "_blank");
-    if (!w) { alert("Allow pop-ups for this site to download the PDF."); return; }
-    w.document.write(html);
-    w.document.close();
+    // Use a hidden iframe (not a pop-up window) so pop-up blockers can't stop it.
+    const iframe = document.createElement("iframe");
+    iframe.style.cssText = "position:fixed;right:0;bottom:0;width:0;height:0;border:0;";
+    document.body.appendChild(iframe);
+    const doc = iframe.contentWindow.document;
+    doc.open(); doc.write(html); doc.close();
+    const done = () => { if (iframe.parentNode) document.body.removeChild(iframe); };
+    iframe.contentWindow.onafterprint = done;
+    setTimeout(() => {
+      iframe.contentWindow.focus();
+      iframe.contentWindow.print();   // opens the print dialog -> choose "Save as PDF"
+      setTimeout(done, 60000);        // safety cleanup if onafterprint never fires
+    }, 250);
   }
 
   return (
@@ -220,6 +228,13 @@ export default function ProctorDashboard() {
   const expanded = sessions.find((s) => s.session_id === expandedId) || null;
   const answersSession = sessions.find((s) => s.session_id === answersId) || null;
 
+  async function messageCandidate(s) {
+    const text = window.prompt(`Message to ${s.candidate_name} (pops up on their screen):`);
+    if (!text || !text.trim()) return;
+    try { await sendCandidateMessage(s.session_id, text.trim()); }
+    catch { window.alert("Could not send the message."); }
+  }
+
   async function removeCandidate(s) {
     if (!window.confirm(
       `Remove ${s.candidate_name}? This permanently deletes their answers, ` +
@@ -295,7 +310,11 @@ export default function ProctorDashboard() {
                 <div className="card-actions">
                   <button className="ghost view-answers"
                           onClick={() => setAnswersId(s.session_id)}>
-                    📄 View answers
+                    📄 Answers
+                  </button>
+                  <button className="ghost msg-btn"
+                          onClick={() => messageCandidate(s)}>
+                    ✉ Message
                   </button>
                   <button className="ghost remove-btn"
                           onClick={() => removeCandidate(s)}>

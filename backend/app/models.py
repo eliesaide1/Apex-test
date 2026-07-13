@@ -62,6 +62,11 @@ class AnswerRequest(BaseModel):
     answer: str
 
 
+class MessageRequest(BaseModel):
+    session_id: str
+    text: str
+
+
 class SubmitRequest(BaseModel):
     session_id: str
     # Free-text answers are saved per-question during the exam; on submit we also

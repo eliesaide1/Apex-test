@@ -68,6 +68,19 @@ export async function sendSnapshot(sessionId, blob) {
   }
 }
 
+// Candidate polls for proctor messages (returns and clears them server-side).
+export async function fetchMessages(sessionId) {
+  try {
+    const r = await fetch(`${BASE}/api/messages/${sessionId}`, {
+      headers: { ...candidateAuth() },
+    });
+    if (!r.ok) return { messages: [] };
+    return r.json();
+  } catch {
+    return { messages: [] };
+  }
+}
+
 export async function heartbeat(sessionId) {
   try {
     const fd = new FormData();
@@ -122,6 +135,17 @@ export async function fetchSessions() {
     setProctorToken("");
     throw new Error("unauthorized");
   }
+  return r.json();
+}
+
+// Proctor: send a message that pops up on the candidate's screen.
+export async function sendCandidateMessage(sessionId, text) {
+  const r = await fetch(`${BASE}/api/message`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Authorization: `Bearer ${getProctorToken()}` },
+    body: JSON.stringify({ session_id: sessionId, text }),
+  });
+  if (!r.ok) throw new Error("Send failed");
   return r.json();
 }
 

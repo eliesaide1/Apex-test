@@ -41,6 +41,10 @@ class Session:
 # In-memory live frames, keyed by session id. Not persisted (see module docstring).
 _snapshots: dict[str, tuple[bytes, float]] = {}
 
+# In-memory proctor->candidate messages, delivered once then cleared.
+_messages: dict[str, list[dict]] = {}
+_msg_seq = 0
+
 
 def _row_to_session(row: db.sqlite3.Row, with_flags: bool = True) -> Session:
     snap = _snapshots.get(row["id"])
@@ -150,6 +154,22 @@ def get_answers(session_id: str) -> dict[str, dict]:
     )
     return {r["question_id"]: {"answer": r["answer"], "updated_at": r["updated_at"]}
             for r in rows}
+
+
+def add_message(session_id: str, text: str) -> bool:
+    """Queue a proctor message for the candidate. False if session unknown."""
+    global _msg_seq
+    if db.query_one("SELECT id FROM sessions WHERE id=?", (session_id,)) is None:
+        return False
+    _msg_seq += 1
+    _messages.setdefault(session_id, []).append(
+        {"id": _msg_seq, "text": text, "ts": time.time()})
+    return True
+
+
+def pop_messages(session_id: str) -> list[dict]:
+    """Return and clear the candidate's pending messages (deliver-once)."""
+    return _messages.pop(session_id, [])
 
 
 def delete_session(session_id: str) -> bool:

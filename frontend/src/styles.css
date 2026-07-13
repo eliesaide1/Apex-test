@@ -233,6 +233,16 @@ button:disabled { opacity: .5; cursor: not-allowed; }
 .card-actions { display: flex; gap: 8px; margin-top: 10px; }
 .card-actions .ghost { flex: 1; margin-top: 0; font-size: 13px; }
 .remove-btn:hover { border-color: var(--high); color: var(--high); }
+.msg-btn:hover { border-color: var(--accent); color: var(--accent); }
+
+/* proctor -> candidate message popup */
+.msg-pop { z-index: 100; }
+.msg-card { background: var(--panel); border: 2px solid var(--accent);
+  border-radius: 14px; padding: 26px 30px; max-width: 440px; text-align: center; }
+.msg-title { font-size: 12px; text-transform: uppercase; letter-spacing: .05em;
+  color: var(--accent); margin-bottom: 10px; }
+.msg-text { font-size: 17px; line-height: 1.5; white-space: pre-wrap; }
+.msg-card button { min-width: 120px; }
 
 /* answers modal */
 .answers-modal { width: min(820px, 96vw); }
