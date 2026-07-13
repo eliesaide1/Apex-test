@@ -26,7 +26,12 @@ export function useWebcam(sessionId, { intervalMs = 3000 } = {}) {
     if (!sessionId) return;
     let stream, timer, poll, cancelled = false;
 
-    const trackLive = (t) => !!t && t.readyState === "live" && !t.muted;
+    // Liveness is based on readyState only. We deliberately ignore the transient
+    // `muted` flag: browsers toggle it on silence / tab-blur, which caused the
+    // mic to flap off/on every few seconds. A device being disabled, unplugged,
+    // or its permission revoked ends the track (readyState !== "live"), which we
+    // DO catch. (OS-level soft-mute isn't reliably detectable — platform limit.)
+    const trackLive = (t) => !!t && t.readyState === "live";
 
     (async () => {
       try {
@@ -50,15 +55,10 @@ export function useWebcam(sessionId, { intervalMs = 3000 } = {}) {
         };
         sync();
 
-        // React to hardware/permission changes on either track.
-        [vTrack, aTrack].forEach((t) => {
-          if (!t) return;
-          t.addEventListener("ended", sync);
-          t.addEventListener("mute", sync);
-          t.addEventListener("unmute", sync);
-        });
-        // Belt-and-suspenders: some browsers don't fire mute/unmute reliably.
-        poll = setInterval(sync, 1000);
+        // React to a track actually ending (device disabled / unplugged / revoked).
+        [vTrack, aTrack].forEach((t) => t && t.addEventListener("ended", sync));
+        // Poll as a backstop in case "ended" doesn't fire.
+        poll = setInterval(sync, 1500);
 
         timer = setInterval(capture, intervalMs);
       } catch (e) {

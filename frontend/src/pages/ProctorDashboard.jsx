@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   fetchSessions, fetchAnswers, deleteSession, sendCandidateMessage,
   snapshotUrl, proctorWsUrl, proctorLogin, getProctorToken, setProctorToken,
@@ -219,7 +219,6 @@ function Dropoffs({ dropoffs }) {
 export default function ProctorDashboard() {
   const [authed, setAuthed] = useState(!!getProctorToken());
   const [sessions, setSessions] = useState([]);
-  const [feed, setFeed] = useState([]);
   const [tick, setTick] = useState(0);   // drives live camera refresh
   const [expandedId, setExpandedId] = useState(null);   // candidate camera shown large
   const [answersId, setAnswersId] = useState(null);     // candidate answers shown
@@ -227,6 +226,24 @@ export default function ProctorDashboard() {
 
   const expanded = sessions.find((s) => s.session_id === expandedId) || null;
   const answersSession = sessions.find((s) => s.session_id === answersId) || null;
+
+  // Live feed is derived from the polled sessions, so it always shows history
+  // (not just events that arrived after this dashboard connected).
+  const feed = useMemo(() => {
+    const items = [];
+    sessions.forEach((s) => {
+      s.flags.forEach((f) => items.push({
+        kind: "flag", candidate_name: s.candidate_name, type: f.type,
+        detail: f.detail, severity: f.severity, at: f.ts * 1000,
+      }));
+      if (s.submitted) items.push({
+        kind: "submit", candidate_name: s.candidate_name,
+        answered: s.answered, total: s.total_questions,
+        flags: s.flags.length, at: s.last_seen * 1000,
+      });
+    });
+    return items.sort((a, b) => b.at - a.at).slice(0, 100);
+  }, [sessions]);
 
   async function messageCandidate(s) {
     const text = window.prompt(`Message to ${s.candidate_name} (pops up on their screen):`);
@@ -257,13 +274,11 @@ export default function ProctorDashboard() {
     const poll = setInterval(load, 3000);          // refresh presence + drop-offs
     const cam = setInterval(() => setTick((t) => t + 1), 2500); // refresh camera frames
 
+    // WebSocket gives instant refresh on new events; the feed itself is derived
+    // from the polled sessions, so a message just triggers an immediate reload.
     const ws = new WebSocket(proctorWsUrl());
     wsRef.current = ws;
-    ws.onmessage = (ev) => {
-      const msg = JSON.parse(ev.data);
-      setFeed((f) => [{ ...msg, at: Date.now() }, ...f].slice(0, 100));
-      load();
-    };
+    ws.onmessage = () => load();
     return () => { clearInterval(poll); clearInterval(cam); ws.close(); };
   }, [authed]);
 
