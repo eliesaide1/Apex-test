@@ -36,7 +36,8 @@ from .auth import (
     make_token, verify_token, require_proctor, require_candidate,
 )
 from .models import (
-    LoginRequest, LoginResponse, FlagRequest, SubmitRequest, SubmitResponse,
+    LoginRequest, LoginResponse, FlagRequest, AnswerRequest,
+    SubmitRequest, SubmitResponse,
 )
 from .proctoring import analyze_snapshot
 
@@ -177,21 +178,36 @@ async def snapshot(
     return {"ok": True, "detections": detections}
 
 
+@app.post("/api/answer")
+async def answer(req: AnswerRequest, token: dict = Depends(require_candidate)):
+    """Save one question's free-text answer (per-question 'Save' button)."""
+    _require_own_session(token, req.session_id)
+    if not store.save_answer(req.session_id, req.question_id, req.answer):
+        raise HTTPException(status_code=404, detail="Unknown session")
+    return {"ok": True,
+            "answered": store.count_answers(req.session_id),
+            "total": exam_data.question_count()}
+
+
 @app.post("/api/submit", response_model=SubmitResponse)
 async def submit(req: SubmitRequest, token: dict = Depends(require_candidate)):
     _require_own_session(token, req.session_id)
-    session = store.get_session(req.session_id)
-    if session is None:
+    if store.get_session(req.session_id) is None:
         raise HTTPException(status_code=404, detail="Unknown session")
 
-    score, total = exam_data.grade(req.answers)
-    session = store.set_submitted(req.session_id, score) or session
+    # Save-all safety net for any textarea the candidate didn't explicitly save.
+    for qid, text in (req.answers or {}).items():
+        store.save_answer(req.session_id, qid, text)
+
+    session = store.set_submitted(req.session_id) or store.get_session(req.session_id)
+    answered = store.count_answers(req.session_id)
+    total = exam_data.question_count()
     await hub.broadcast({
         "kind": "submit", "session_id": session.id,
         "candidate_name": session.candidate_name,
-        "score": score, "total": total, "flags": len(session.flags),
+        "answered": answered, "total": total, "flags": len(session.flags),
     })
-    return SubmitResponse(score=score, total=total, flags=len(session.flags))
+    return SubmitResponse(answered=answered, total=total, flags=len(session.flags))
 
 
 @app.post("/api/heartbeat")
@@ -229,6 +245,8 @@ async def sessions(_: dict = Depends(require_proctor)):
             "started_at": s.started_at,
             "submitted": s.submitted,
             "score": s.score,
+            "answered": store.count_answers(s.id),
+            "total_questions": exam_data.question_count(),
             "last_seen": s.last_seen,
             "seconds_since_seen": round(since_seen, 1),
             "online": since_seen < ONLINE_WINDOW and not s.submitted,
@@ -242,6 +260,29 @@ async def sessions(_: dict = Depends(require_proctor)):
             ],
         })
     return out
+
+
+@app.get("/api/answers/{session_id}")
+async def answers_for(session_id: str, _: dict = Depends(require_proctor)):
+    """Proctor: read a candidate's saved free-text answers, joined to questions."""
+    s = store.get_session(session_id)
+    if s is None:
+        raise HTTPException(status_code=404, detail="Unknown session")
+    saved = store.get_answers(session_id)
+    items = []
+    for sec in exam_data.EXAM["sections"]:
+        for q in sec["questions"]:
+            a = saved.get(q["id"])
+            items.append({
+                "question_id": q["id"],
+                "section": sec["id"],
+                "text": q["text"],
+                "points": q["points"],
+                "answer": a["answer"] if a else "",
+                "updated_at": a["updated_at"] if a else None,
+            })
+    return {"session_id": session_id, "candidate_name": s.candidate_name,
+            "submitted": s.submitted, "items": items}
 
 
 @app.get("/api/snapshot/{session_id}")

@@ -80,6 +80,17 @@ export async function heartbeat(sessionId) {
   }
 }
 
+// Save a single question's free-text answer (per-question "Save" button).
+export async function saveAnswer(sessionId, questionId, answer) {
+  const r = await fetch(`${BASE}/api/answer`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", ...candidateAuth() },
+    body: JSON.stringify({ session_id: sessionId, question_id: questionId, answer }),
+  });
+  if (!r.ok) throw new Error("Save failed");
+  return r.json();
+}
+
 export async function submit(sessionId, answers) {
   const r = await fetch(`${BASE}/api/submit`, {
     method: "POST",
@@ -111,6 +122,15 @@ export async function fetchSessions() {
     setProctorToken("");
     throw new Error("unauthorized");
   }
+  return r.json();
+}
+
+// Proctor: fetch a candidate's saved answers joined to the questions.
+export async function fetchAnswers(sessionId) {
+  const r = await fetch(`${BASE}/api/answers/${sessionId}`, {
+    headers: { Authorization: `Bearer ${getProctorToken()}` },
+  });
+  if (!r.ok) throw new Error("Could not load answers");
   return r.json();
 }
 

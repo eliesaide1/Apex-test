@@ -1,10 +1,60 @@
 import { useEffect, useRef, useState } from "react";
 import {
-  fetchSessions, snapshotUrl, proctorWsUrl, proctorLogin,
+  fetchSessions, fetchAnswers, snapshotUrl, proctorWsUrl, proctorLogin,
   getProctorToken, setProctorToken,
 } from "../api";
 
 const fmtTime = (ts) => new Date(ts * 1000).toLocaleTimeString();
+
+/** Reads a candidate's saved answers. Closes on backdrop click or Esc. */
+function AnswersModal({ session, onClose }) {
+  const [data, setData] = useState(null);
+  const [err, setErr] = useState("");
+
+  useEffect(() => {
+    let alive = true;
+    fetchAnswers(session.session_id)
+      .then((d) => alive && setData(d))
+      .catch(() => alive && setErr("Could not load answers."));
+    const onKey = (e) => e.key === "Escape" && onClose();
+    document.addEventListener("keydown", onKey);
+    return () => { alive = false; document.removeEventListener("keydown", onKey); };
+  }, [session.session_id, onClose]);
+
+  const answered = data?.items.filter((i) => i.answer.trim()).length ?? 0;
+  const total = data?.items.length ?? 0;
+
+  return (
+    <div className="modal-backdrop" onClick={onClose}>
+      <div className="modal answers-modal" onClick={(e) => e.stopPropagation()}>
+        <div className="modal-head">
+          <div>
+            <strong>{session.candidate_name}</strong>
+            <span className="muted"> · {answered}/{total} answered
+              {data?.submitted ? " · submitted" : ""}</span>
+          </div>
+          <button className="ghost" onClick={onClose}>✕ Close</button>
+        </div>
+        <div className="answers-body">
+          {err && <div className="error">{err}</div>}
+          {!data && !err && <div className="muted">Loading…</div>}
+          {data?.items.map((it, i) => (
+            <div className="ans" key={it.question_id}>
+              <div className="ans-q">
+                <span className="q-num">{i + 1}</span>
+                <span className="q-body">{it.text}</span>
+                <span className="q-points">{it.points} pt{it.points > 1 ? "s" : ""}</span>
+              </div>
+              {it.answer.trim()
+                ? <pre className="ans-a">{it.answer}</pre>
+                : <div className="ans-a empty">— no answer —</div>}
+            </div>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
 
 /** Password gate shown until the proctor authenticates. */
 function ProctorLogin({ onAuthed }) {
@@ -126,10 +176,12 @@ export default function ProctorDashboard() {
   const [sessions, setSessions] = useState([]);
   const [feed, setFeed] = useState([]);
   const [tick, setTick] = useState(0);   // drives live camera refresh
-  const [expandedId, setExpandedId] = useState(null);   // candidate shown large
+  const [expandedId, setExpandedId] = useState(null);   // candidate camera shown large
+  const [answersId, setAnswersId] = useState(null);     // candidate answers shown
   const wsRef = useRef(null);
 
   const expanded = sessions.find((s) => s.session_id === expandedId) || null;
+  const answersSession = sessions.find((s) => s.session_id === answersId) || null;
 
   useEffect(() => {
     if (!authed) return;
@@ -185,11 +237,16 @@ export default function ProctorDashboard() {
                 </div>
 
                 <div className="cstats">
-                  <span>Score: {s.score == null ? "—" : `${s.score}`}</span>
+                  <span>Answered: {s.answered ?? 0}/{s.total_questions ?? "—"}</span>
                   <span className={high ? "hi" : ""}>Flags: {s.flags.length}
                     {high ? ` (${high} high)` : ""}</span>
                   <span>Last seen: {fmtTime(s.last_seen)}</span>
                 </div>
+
+                <button className="ghost view-answers"
+                        onClick={() => setAnswersId(s.session_id)}>
+                  📄 View answers
+                </button>
 
                 <div className="do-title">Drop-off timeline</div>
                 <Dropoffs dropoffs={s.dropoffs} />
@@ -208,7 +265,7 @@ export default function ProctorDashboard() {
               <span className="feed-time">{new Date(e.at).toLocaleTimeString()}</span>
               <span className="feed-name">{e.candidate_name}</span>
               {e.kind === "submit"
-                ? <> submitted — {e.score}/{e.total} ({e.flags} flags)</>
+                ? <> submitted — {e.answered}/{e.total} answered ({e.flags} flags)</>
                 : <> <strong>{e.type}</strong> {e.detail ? `— ${e.detail}` : ""}</>}
             </li>
           ))}
@@ -218,6 +275,10 @@ export default function ProctorDashboard() {
       {expanded && (
         <CameraModal session={expanded} tick={tick}
                      onClose={() => setExpandedId(null)} />
+      )}
+      {answersSession && (
+        <AnswersModal session={answersSession}
+                      onClose={() => setAnswersId(null)} />
       )}
     </div>
   );

@@ -114,7 +114,7 @@ def add_flag(session_id: str, flag: Flag) -> Session | None:
     return get_session(session_id)
 
 
-def set_submitted(session_id: str, score: int) -> Session | None:
+def set_submitted(session_id: str, score: int | None = None) -> Session | None:
     cur = db.execute(
         "UPDATE sessions SET submitted=1, score=? WHERE id=?", (score, session_id)
     )
@@ -124,3 +124,37 @@ def set_submitted(session_id: str, score: int) -> Session | None:
 def all_sessions() -> list[Session]:
     rows = db.query("SELECT * FROM sessions ORDER BY started_at")
     return [_row_to_session(r) for r in rows]
+
+
+# --- free-text answers ---------------------------------------------------- #
+def save_answer(session_id: str, question_id: str, answer: str) -> bool:
+    """Upsert a single question's answer. Returns False if session unknown."""
+    if db.query_one("SELECT id FROM sessions WHERE id=?", (session_id,)) is None:
+        return False
+    db.execute(
+        "INSERT INTO answers (session_id, question_id, answer, updated_at) "
+        "VALUES (?, ?, ?, ?) "
+        "ON CONFLICT(session_id, question_id) DO UPDATE SET "
+        "answer=excluded.answer, updated_at=excluded.updated_at",
+        (session_id, question_id, answer, time.time()),
+    )
+    db.execute("UPDATE sessions SET last_seen=? WHERE id=?", (time.time(), session_id))
+    return True
+
+
+def get_answers(session_id: str) -> dict[str, dict]:
+    """question_id -> {'answer': str, 'updated_at': float}."""
+    rows = db.query(
+        "SELECT question_id, answer, updated_at FROM answers WHERE session_id=?",
+        (session_id,),
+    )
+    return {r["question_id"]: {"answer": r["answer"], "updated_at": r["updated_at"]}
+            for r in rows}
+
+
+def count_answers(session_id: str) -> int:
+    row = db.query_one(
+        "SELECT COUNT(*) AS n FROM answers WHERE session_id=? AND TRIM(answer) <> ''",
+        (session_id,),
+    )
+    return row["n"] if row else 0

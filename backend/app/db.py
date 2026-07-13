@@ -54,6 +54,13 @@ def init() -> None:
                 ts         REAL NOT NULL
             );
             CREATE INDEX IF NOT EXISTS idx_flags_session ON flags(session_id);
+            CREATE TABLE IF NOT EXISTS answers (
+                session_id  TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+                question_id TEXT NOT NULL,
+                answer      TEXT NOT NULL,
+                updated_at  REAL NOT NULL,
+                PRIMARY KEY (session_id, question_id)
+            );
             """
         )
         _conn.commit()

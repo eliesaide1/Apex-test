@@ -2,34 +2,69 @@ import { useEffect, useRef, useState } from "react";
 import { sendSnapshot } from "../api";
 
 /**
- * Phase 2: request the webcam, show a live preview, and upload a JPEG snapshot
- * every `intervalMs`. The backend (Phase 3) runs CV on each frame to detect a
- * phone, a second person, or the candidate looking away.
+ * Request the webcam AND microphone, show a live video preview, and upload a JPEG
+ * snapshot every `intervalMs` for the proctor / CV pipeline.
+ *
+ * Both devices are REQUIRED. We monitor each track's liveness so the exam can
+ * hide the questions the moment the camera or mic is turned off, and reveal them
+ * again once both are back. Reliable "off" signals: permission revoked, device
+ * unplugged, or track stopped/muted. (A browser cannot always detect an OS-level
+ * soft-mute for privacy reasons — that's a platform limitation.)
+ *
+ * Returns:
+ *   videoRef, canvasRef  — attach to <video>/<canvas>
+ *   camStatus, micStatus — "idle" | "live" | "denied" | "error" | "off"
+ *   camOn, micOn         — booleans for gating
  */
 export function useWebcam(sessionId, { intervalMs = 3000 } = {}) {
   const videoRef = useRef(null);
   const canvasRef = useRef(null);
-  const [status, setStatus] = useState("idle"); // idle | live | denied | error
+  const [camStatus, setCamStatus] = useState("idle");
+  const [micStatus, setMicStatus] = useState("idle");
 
   useEffect(() => {
     if (!sessionId) return;
-    let stream, timer, cancelled = false;
+    let stream, timer, poll, cancelled = false;
+
+    const trackLive = (t) => !!t && t.readyState === "live" && !t.muted;
 
     (async () => {
       try {
         stream = await navigator.mediaDevices.getUserMedia({
-          video: { width: 320, height: 240 }, audio: false,
+          video: { width: 320, height: 240 },
+          audio: true,
         });
-        if (cancelled) return;
+        if (cancelled) { stream.getTracks().forEach((t) => t.stop()); return; }
+
         if (videoRef.current) {
           videoRef.current.srcObject = stream;
           await videoRef.current.play().catch(() => {});
         }
-        setStatus("live");
+
+        const vTrack = stream.getVideoTracks()[0];
+        const aTrack = stream.getAudioTracks()[0];
+
+        const sync = () => {
+          setCamStatus(trackLive(vTrack) ? "live" : "off");
+          setMicStatus(trackLive(aTrack) ? "live" : "off");
+        };
+        sync();
+
+        // React to hardware/permission changes on either track.
+        [vTrack, aTrack].forEach((t) => {
+          if (!t) return;
+          t.addEventListener("ended", sync);
+          t.addEventListener("mute", sync);
+          t.addEventListener("unmute", sync);
+        });
+        // Belt-and-suspenders: some browsers don't fire mute/unmute reliably.
+        poll = setInterval(sync, 1000);
 
         timer = setInterval(capture, intervalMs);
       } catch (e) {
-        setStatus(e && e.name === "NotAllowedError" ? "denied" : "error");
+        const denied = e && e.name === "NotAllowedError";
+        setCamStatus(denied ? "denied" : "error");
+        setMicStatus(denied ? "denied" : "error");
       }
     })();
 
@@ -45,9 +80,12 @@ export function useWebcam(sessionId, { intervalMs = 3000 } = {}) {
     return () => {
       cancelled = true;
       clearInterval(timer);
+      clearInterval(poll);
       stream?.getTracks().forEach((t) => t.stop());
     };
   }, [sessionId, intervalMs]);
 
-  return { videoRef, canvasRef, status };
+  const camOn = camStatus === "live";
+  const micOn = micStatus === "live";
+  return { videoRef, canvasRef, camStatus, micStatus, camOn, micOn };
 }

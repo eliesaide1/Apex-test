@@ -14,16 +14,19 @@ export default function Result() {
     </div></div>;
   }
 
-  const pct = Math.round((result.score / result.total) * 100);
   return (
     <div className="center">
       <div className="card">
         <h1>Exam submitted</h1>
-        <div className="score">{result.score} / {result.total}</div>
-        <div className="muted">{pct}% correct</div>
+        <div className="score">{result.answered} / {result.total}</div>
+        <div className="muted">questions answered</div>
+        <p className="notice">
+          Your responses have been submitted for review. This assessment is graded
+          manually by the Apex AI team — there is no instant score.
+        </p>
         {result.flags > 0 && (
           <div className="error" style={{ marginTop: 16 }}>
-            {result.flags} proctoring flag(s) recorded — sent to review.
+            {result.flags} proctoring flag(s) recorded — included in your review.
           </div>
         )}
         {result.reason && result.reason !== "manual" && (

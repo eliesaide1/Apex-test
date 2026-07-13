@@ -10,47 +10,65 @@ class LoginRequest(BaseModel):
     exam_code: str
 
 
-class LoginResponse(BaseModel):
-    session_id: str
-    candidate_name: str
-    token: str
-    exam: "ExamPublic"
-
-
-class Choice(BaseModel):
-    id: str
-    text: str
-
-
 class QuestionPublic(BaseModel):
     id: str
     text: str
-    choices: list[Choice]
+    points: int
+
+
+class SectionPublic(BaseModel):
+    id: str
+    title: str
+    points: int
+    instructions: str = ""
+    scenario: Optional[str] = None
+    questions: list[QuestionPublic]
+
+
+class Author(BaseModel):
+    name: str
+    role: str
 
 
 class ExamPublic(BaseModel):
     id: str
     title: str
     duration_seconds: int
-    questions: list[QuestionPublic]
+    total_points: int
+    instructions: str = ""
+    org: str = ""
+    authors: list[Author] = []
+    sections: list[SectionPublic]
+
+
+class LoginResponse(BaseModel):
+    session_id: str
+    candidate_name: str
+    token: str
+    exam: ExamPublic
 
 
 class FlagRequest(BaseModel):
     session_id: str
-    type: str            # e.g. "tab_switch", "fullscreen_exit", "printscreen", "copy"
+    type: str            # e.g. "tab_switch", "camera_off", "mic_off", "printscreen"
     detail: Optional[str] = None
     severity: str = "medium"   # "low" | "medium" | "high"
 
 
+class AnswerRequest(BaseModel):
+    session_id: str
+    question_id: str
+    answer: str
+
+
 class SubmitRequest(BaseModel):
     session_id: str
-    answers: dict[str, str]     # question_id -> choice_id
+    # Free-text answers are saved per-question during the exam; on submit we also
+    # accept the full map as a save-all safety net (question_id -> answer text).
+    answers: dict[str, str] = {}
 
 
 class SubmitResponse(BaseModel):
-    score: int
+    answered: int
     total: int
     flags: int
-
-
-LoginResponse.model_rebuild()
