@@ -13,14 +13,22 @@ import { sendFlag, heartbeat } from "../api";
  * native/kiosk wrapper (Electron/Tauri) — the webcam AI (Phase 3) is what
  * actually catches that class of cheating.
  */
-export function useProctoring(sessionId, { maxWarnings = 5, onForceSubmit } = {}) {
+export function useProctoring(sessionId, { maxWarnings = 5, onForceSubmit, active = true } = {}) {
   const [warnings, setWarnings] = useState(0);
   const [lastEvent, setLastEvent] = useState(null);
   const warnRef = useRef(0);
   const awayAtRef = useRef(null);   // when the candidate left the exam view
 
+  // Kept current every render so the listeners (attached once) see live state
+  // without re-subscribing. Navigation guards only count while `active`, i.e.
+  // once the camera+mic are granted and the exam is really running — this stops
+  // the startup permission-prompt / fullscreen cascade from firing false flags.
+  const activeRef = useRef(active);
+  activeRef.current = active;
+
   useEffect(() => {
     if (!sessionId) return;
+    let blurTimer = null;
 
     function flag(type, detail, severity = "medium") {
       warnRef.current += 1;
@@ -30,8 +38,9 @@ export function useProctoring(sessionId, { maxWarnings = 5, onForceSubmit } = {}
       if (warnRef.current >= maxWarnings && onForceSubmit) onForceSubmit(type);
     }
 
-    // Mark the start of a drop-off (leaving the exam view).
+    // Mark the start of a drop-off (leaving the exam view). No-op until active.
     function markAway(type, detail) {
+      if (!activeRef.current) return;
       if (awayAtRef.current == null) awayAtRef.current = Date.now();
       flag(type, detail, "high");
     }
@@ -46,16 +55,22 @@ export function useProctoring(sessionId, { maxWarnings = 5, onForceSubmit } = {}
       setLastEvent({ type: "away_return", detail: `Away ${secs}s`, at: Date.now() });
     }
 
-    // Tab hidden / minimized
+    // Tab hidden / minimized (a real tab switch — logged immediately).
     const onVisibility = () => {
       if (document.hidden) markAway("tab_switch", "Tab hidden / switched away");
       else markReturn();
     };
-    // Window lost / regained focus (alt-tab to another app, e.g. AnyDesk window)
-    const onBlur = () => markAway("focus_loss", "Window lost focus");
-    const onFocus = () => markReturn();
-    // Fullscreen exited
+    // Window lost focus (alt-tab). Debounced: only counts if it stays unfocused
+    // ~1.5s, so a notification / permission prompt / quick blip doesn't flag.
+    const onBlur = () => {
+      if (!activeRef.current) return;
+      clearTimeout(blurTimer);
+      blurTimer = setTimeout(() => markAway("focus_loss", "Window lost focus"), 1500);
+    };
+    const onFocus = () => { clearTimeout(blurTimer); markReturn(); };
+    // Fullscreen exited (ignored until the exam is active).
     const onFullscreenChange = () => {
+      if (!activeRef.current) return;
       if (!document.fullscreenElement)
         flag("fullscreen_exit", "Left fullscreen", "high");
     };
@@ -107,6 +122,7 @@ export function useProctoring(sessionId, { maxWarnings = 5, onForceSubmit } = {}
 
     return () => {
       clearInterval(hb);
+      clearTimeout(blurTimer);
       document.removeEventListener("visibilitychange", onVisibility);
       window.removeEventListener("blur", onBlur);
       window.removeEventListener("focus", onFocus);

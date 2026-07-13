@@ -54,11 +54,15 @@ export default function Exam() {
     nav("/result");
   }, [answers, sid, submitting, nav]);
 
-  const { warnings, lastEvent, maxWarnings } = useProctoring(
-    sid, { maxWarnings: 6, onForceSubmit: (t) => doSubmit(`auto-submitted: ${t}`) }
-  );
   const { videoRef, canvasRef, camStatus, micStatus, camOn, micOn } = useWebcam(sid);
   const mediaReady = camOn && micOn;
+  // Only start counting navigation warnings once the exam is truly active
+  // (camera + mic granted). This avoids false flags from the startup
+  // permission prompt and fullscreen transition.
+  const { warnings, lastEvent, maxWarnings } = useProctoring(
+    sid, { maxWarnings: 6, active: mediaReady,
+           onForceSubmit: (t) => doSubmit(`auto-submitted: ${t}`) }
+  );
 
   // Notify the proctor whenever the camera or mic drops or returns mid-exam.
   const prevCam = useRef(true), prevMic = useRef(true);

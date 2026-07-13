@@ -194,6 +194,24 @@ button:disabled { opacity: .5; cursor: not-allowed; }
 .cstats { display: flex; flex-wrap: wrap; gap: 4px 14px; font-size: 12px;
   color: var(--muted); margin: 8px 0; }
 .cstats .hi { color: var(--high); }
+.flags-link { margin: 0; padding: 0; background: none; border: 0; color: var(--muted);
+  font: inherit; cursor: pointer; text-decoration: underline dotted; }
+.flags-link:hover:not(:disabled) { color: var(--accent); }
+.flags-link.hi { color: var(--high); }
+.flags-link:disabled { text-decoration: none; cursor: default; opacity: 1; }
+
+/* warnings review rows */
+.warn-row { display: flex; align-items: center; gap: 10px; padding: 8px 4px;
+  border-bottom: 1px solid var(--line); font-size: 13px; }
+.warn-time { color: var(--muted); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.warn-sev { text-transform: uppercase; font-size: 10px; letter-spacing: .04em;
+  padding: 2px 7px; border-radius: 999px; border: 1px solid var(--line); }
+.warn-sev.high { color: var(--high); border-color: var(--high); }
+.warn-sev.medium { color: var(--warn); border-color: var(--warn); }
+.warn-sev.low { color: var(--muted); }
+.warn-type { flex: 1; min-width: 0; }
+.warn-x { margin: 0; padding: 3px 9px; }
+.warn-x:hover { border-color: var(--high); color: var(--high); }
 .do-title { font-size: 11px; text-transform: uppercase; letter-spacing: .04em;
   color: var(--muted); margin-top: 6px; }
 .dropoffs { list-style: none; margin: 4px 0 0; padding: 0; max-height: 96px;

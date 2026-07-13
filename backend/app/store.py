@@ -156,6 +156,26 @@ def get_answers(session_id: str) -> dict[str, dict]:
             for r in rows}
 
 
+def get_flags_detailed(session_id: str) -> list[dict]:
+    """Flags with their DB ids, newest first (for the proctor's review panel)."""
+    rows = db.query(
+        "SELECT id, type, detail, severity, ts FROM flags WHERE session_id=? "
+        "ORDER BY ts DESC", (session_id,))
+    return [{"id": r["id"], "type": r["type"], "detail": r["detail"],
+             "severity": r["severity"], "ts": r["ts"]} for r in rows]
+
+
+def delete_flag(session_id: str, flag_id: int) -> bool:
+    cur = db.execute("DELETE FROM flags WHERE id=? AND session_id=?",
+                     (flag_id, session_id))
+    return cur.rowcount > 0
+
+
+def clear_flags(session_id: str) -> int:
+    cur = db.execute("DELETE FROM flags WHERE session_id=?", (session_id,))
+    return cur.rowcount
+
+
 def add_message(session_id: str, text: str) -> bool:
     """Queue a proctor message for the candidate. False if session unknown."""
     global _msg_seq

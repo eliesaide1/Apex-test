@@ -269,6 +269,25 @@ async def sessions(_: dict = Depends(require_proctor)):
     return out
 
 
+@app.get("/api/flags/{session_id}")
+async def list_flags(session_id: str, _: dict = Depends(require_proctor)):
+    if store.get_session(session_id) is None:
+        raise HTTPException(status_code=404, detail="Unknown session")
+    return {"flags": store.get_flags_detailed(session_id)}
+
+
+@app.delete("/api/flags/{session_id}/{flag_id}")
+async def dismiss_flag(session_id: str, flag_id: int, _: dict = Depends(require_proctor)):
+    if not store.delete_flag(session_id, flag_id):
+        raise HTTPException(status_code=404, detail="Unknown flag")
+    return {"ok": True}
+
+
+@app.delete("/api/flags/{session_id}")
+async def clear_all_flags(session_id: str, _: dict = Depends(require_proctor)):
+    return {"ok": True, "cleared": store.clear_flags(session_id)}
+
+
 @app.post("/api/message")
 async def send_message(req: MessageRequest, _: dict = Depends(require_proctor)):
     """Proctor sends a message that pops up on the candidate's screen."""

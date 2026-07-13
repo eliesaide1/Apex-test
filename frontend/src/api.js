@@ -159,6 +159,29 @@ export async function deleteSession(sessionId) {
   return r.json();
 }
 
+// Proctor: warnings/flags with ids, and dismiss/clear actions.
+export async function fetchFlags(sessionId) {
+  const r = await fetch(`${BASE}/api/flags/${sessionId}`, {
+    headers: { Authorization: `Bearer ${getProctorToken()}` },
+  });
+  if (!r.ok) throw new Error("Could not load warnings");
+  return r.json();
+}
+export async function dismissFlag(sessionId, flagId) {
+  const r = await fetch(`${BASE}/api/flags/${sessionId}/${flagId}`, {
+    method: "DELETE", headers: { Authorization: `Bearer ${getProctorToken()}` },
+  });
+  if (!r.ok) throw new Error("Dismiss failed");
+  return r.json();
+}
+export async function clearFlags(sessionId) {
+  const r = await fetch(`${BASE}/api/flags/${sessionId}`, {
+    method: "DELETE", headers: { Authorization: `Bearer ${getProctorToken()}` },
+  });
+  if (!r.ok) throw new Error("Clear failed");
+  return r.json();
+}
+
 // Proctor: fetch a candidate's saved answers joined to the questions.
 export async function fetchAnswers(sessionId) {
   const r = await fetch(`${BASE}/api/answers/${sessionId}`, {

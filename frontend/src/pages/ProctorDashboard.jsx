@@ -1,10 +1,67 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
-  fetchSessions, fetchAnswers, deleteSession, sendCandidateMessage,
-  snapshotUrl, proctorWsUrl, proctorLogin, getProctorToken, setProctorToken,
+  fetchSessions, fetchAnswers, fetchFlags, dismissFlag, clearFlags,
+  deleteSession, sendCandidateMessage, snapshotUrl, proctorWsUrl,
+  proctorLogin, getProctorToken, setProctorToken,
 } from "../api";
 
 const fmtTime = (ts) => new Date(ts * 1000).toLocaleTimeString();
+
+/** Lists a candidate's warnings/flags; lets the proctor dismiss or clear them. */
+function WarningsModal({ session, onClose, onChanged }) {
+  const [flags, setFlags] = useState(null);
+  const [err, setErr] = useState("");
+
+  const load = () =>
+    fetchFlags(session.session_id).then((d) => setFlags(d.flags)).catch(() => setErr("Could not load warnings."));
+
+  useEffect(() => {
+    load();
+    const onKey = (e) => e.key === "Escape" && onClose();
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  }, [session.session_id]);   // eslint-disable-line react-hooks/exhaustive-deps
+
+  async function dismiss(id) {
+    try { await dismissFlag(session.session_id, id); await load(); onChanged?.(); } catch {}
+  }
+  async function clearAll() {
+    if (!window.confirm(`Clear all warnings for ${session.candidate_name}?`)) return;
+    try { await clearFlags(session.session_id); await load(); onChanged?.(); } catch {}
+  }
+
+  return (
+    <div className="modal-backdrop" onClick={onClose}>
+      <div className="modal answers-modal" onClick={(e) => e.stopPropagation()}>
+        <div className="modal-head">
+          <div>
+            <strong>{session.candidate_name}</strong>
+            <span className="muted"> · {flags?.length ?? 0} warning(s)</span>
+          </div>
+          <div className="modal-actions">
+            {flags?.length > 0 &&
+              <button className="ghost remove-btn" onClick={clearAll}>Clear all</button>}
+            <button className="ghost" onClick={onClose}>✕ Close</button>
+          </div>
+        </div>
+        <div className="answers-body">
+          {err && <div className="error">{err}</div>}
+          {!flags && !err && <div className="muted">Loading…</div>}
+          {flags && flags.length === 0 && <div className="muted">No warnings.</div>}
+          {flags && flags.map((f) => (
+            <div className={`warn-row sev-${f.severity}`} key={f.id}>
+              <span className="warn-time">{fmtTime(f.ts)}</span>
+              <span className={`warn-sev ${f.severity}`}>{f.severity}</span>
+              <span className="warn-type"><strong>{f.type}</strong>{f.detail ? ` — ${f.detail}` : ""}</span>
+              <button className="ghost warn-x" title="Dismiss"
+                      onClick={() => dismiss(f.id)}>✕</button>
+            </div>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
 
 /** Reads a candidate's saved answers. Closes on backdrop click or Esc. */
 function AnswersModal({ session, onClose }) {
@@ -222,10 +279,14 @@ export default function ProctorDashboard() {
   const [tick, setTick] = useState(0);   // drives live camera refresh
   const [expandedId, setExpandedId] = useState(null);   // candidate camera shown large
   const [answersId, setAnswersId] = useState(null);     // candidate answers shown
+  const [warningsId, setWarningsId] = useState(null);   // candidate warnings shown
   const wsRef = useRef(null);
+
+  const refresh = () => fetchSessions().then(setSessions).catch(() => {});
 
   const expanded = sessions.find((s) => s.session_id === expandedId) || null;
   const answersSession = sessions.find((s) => s.session_id === answersId) || null;
+  const warningsSession = sessions.find((s) => s.session_id === warningsId) || null;
 
   // Live feed is derived from the polled sessions, so it always shows history
   // (not just events that arrived after this dashboard connected).
@@ -317,8 +378,12 @@ export default function ProctorDashboard() {
 
                 <div className="cstats">
                   <span>Answered: {s.answered ?? 0}/{s.total_questions ?? "—"}</span>
-                  <span className={high ? "hi" : ""}>Flags: {s.flags.length}
-                    {high ? ` (${high} high)` : ""}</span>
+                  <button className={`flags-link ${high ? "hi" : ""}`}
+                          disabled={!s.flags.length}
+                          onClick={() => setWarningsId(s.session_id)}
+                          title="Click to view / fix warnings">
+                    Flags: {s.flags.length}{high ? ` (${high} high)` : ""}
+                  </button>
                   <span>Last seen: {fmtTime(s.last_seen)}</span>
                 </div>
 
@@ -368,6 +433,11 @@ export default function ProctorDashboard() {
       {answersSession && (
         <AnswersModal session={answersSession}
                       onClose={() => setAnswersId(null)} />
+      )}
+      {warningsSession && (
+        <WarningsModal session={warningsSession}
+                       onClose={() => setWarningsId(null)}
+                       onChanged={refresh} />
       )}
     </div>
   );
