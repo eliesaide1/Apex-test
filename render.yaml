@@ -3,17 +3,19 @@
 # "New +" -> "Blueprint" and point it at this repo.
 #
 # HTTPS is provided automatically, which the webcam + fullscreen features require.
+#
+# FREE PLAN: no persistent disk, and the service sleeps after ~15 min idle. The
+# SQLite DB lives in the container's ephemeral filesystem — it persists while the
+# service is running (fine for a single exam sitting) but resets on restart/sleep.
+# For durable data across restarts, switch to `plan: starter` and add a `disk:`
+# block mounted at /var/data (see git history / README).
 services:
   - type: web
     name: apextestportal
     runtime: docker
     dockerfilePath: ./Dockerfile
-    plan: starter          # a paid plan keeps the disk + avoids cold-start sleeps
+    plan: free
     healthCheckPath: /api/health
-    disk:
-      name: data
-      mountPath: /var/data # matches DB_PATH so SQLite survives redeploys
-      sizeGB: 1
     envVars:
       - key: SECRET_KEY
         generateValue: true          # random, used to sign auth tokens
@@ -21,5 +23,3 @@ services:
         sync: false                  # set in the Render dashboard (secret)
       - key: EXAM_CODE
         value: DEMO                  # change to your real code
-      - key: DB_PATH
-        value: /var/data/apex.db
