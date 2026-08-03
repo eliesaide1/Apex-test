@@ -5,12 +5,15 @@ scoped to that one session):
     POST /api/login              -> start a session; returns token + exam (no keys)
     POST /api/flag               -> record a cheating flag; broadcast to proctors
     POST /api/snapshot           -> upload webcam frame; AI-analyze; flag if needed
+    POST /api/audio              -> upload mic clip; flag sustained talking
     POST /api/submit             -> grade the exam
     POST /api/heartbeat          -> liveness ping
 
 Proctor endpoints (require a proctor bearer token, issued at /api/proctor/login):
     GET  /api/sessions           -> list sessions + flags
     GET  /api/snapshot/{id}      -> latest webcam frame
+    GET  /api/audio/{id}         -> mic clips newer than ?after= (listen-in queue)
+    GET  /api/audio/{id}/{seq}   -> one mic clip's bytes
     WS   /ws/proctor?token=...   -> live stream of flags
 
 The built frontend is served from FRONTEND_DIST so the whole app is one origin.
@@ -39,7 +42,7 @@ from .models import (
     LoginRequest, LoginResponse, FlagRequest, AnswerRequest, MessageRequest,
     SubmitRequest, SubmitResponse,
 )
-from .proctoring import analyze_snapshot
+from .proctoring import analyze_snapshot, analyze_audio
 
 app = FastAPI(title="ApexTestPortal")
 
@@ -178,6 +181,72 @@ async def snapshot(
     return {"ok": True, "detections": detections}
 
 
+@app.post("/api/audio")
+async def audio(
+    session_id: str = Form(...),
+    level: float = Form(0.0),
+    ms: int = Form(0),
+    clip: UploadFile = File(...),
+    token: dict = Depends(require_candidate),
+):
+    """Upload one short microphone clip.
+
+    Clips are self-contained recordings a few seconds long, so the proctor can
+    play them back-to-back as a near-live listen-in feed without any streaming
+    machinery. They are held in a small in-memory ring buffer, never on disk.
+    """
+    _require_own_session(token, session_id)
+    if store.get_session(session_id) is None:
+        raise HTTPException(status_code=404, detail="Unknown session")
+
+    data = await clip.read()
+    lvl = min(1.0, max(0.0, level))
+    # Threshold adapts to this candidate's own room noise (see store.classify_voice).
+    speaking, threshold, calibrating = store.classify_voice(session_id, lvl)
+    saved = store.add_audio(session_id, data, clip.content_type or "audio/webm",
+                            lvl, ms, speaking)
+    if saved is None:
+        raise HTTPException(status_code=404, detail="Unknown session")
+
+    # One flag per talking episode, not one per clip (store tracks the run), and
+    # nothing at all while the room baseline is still being learned.
+    sustained = (not calibrating) and store.note_voice(session_id, speaking)
+    detections = analyze_audio(data, lvl, sustained)
+    for det in detections:
+        f = store.Flag(type=det["type"], detail=det.get("detail"),
+                       severity=det.get("severity", "high"))
+        session = store.add_flag(session_id, f)
+        if session is not None:
+            await hub.broadcast(_flag_event(session, f))
+
+    return {"ok": True, "seq": saved.seq, "speaking": speaking,
+            "threshold": round(threshold, 3), "calibrating": calibrating,
+            "detections": detections}
+
+
+@app.get("/api/audio/{session_id}")
+async def list_audio(session_id: str, after: int = 0,
+                     _: dict = Depends(require_proctor)):
+    """Proctor: which clips are newer than `after` (the listen-in play queue)."""
+    if store.get_session(session_id) is None:
+        raise HTTPException(status_code=404, detail="Unknown session")
+    return {"clips": [
+        {"seq": c.seq, "ts": c.ts, "level": round(c.level, 3), "ms": c.ms}
+        for c in store.audio_since(session_id, after)
+    ]}
+
+
+@app.get("/api/audio/{session_id}/{seq}")
+async def get_audio_clip(session_id: str, seq: int,
+                         _: dict = Depends(require_proctor)):
+    """Proctor: fetch one clip's bytes. Gone once it falls out of the buffer."""
+    clip = store.audio_clip(session_id, seq)
+    if clip is None:
+        raise HTTPException(status_code=404, detail="Clip expired")
+    return Response(content=clip.data, media_type=clip.mime,
+                    headers={"Cache-Control": "no-store"})
+
+
 @app.post("/api/answer")
 async def answer(req: AnswerRequest, token: dict = Depends(require_candidate)):
     """Save one question's free-text answer (per-question 'Save' button)."""
@@ -259,6 +328,12 @@ async def sessions(_: dict = Depends(require_proctor)):
             "online": since_seen < ONLINE_WINDOW and not s.submitted,
             "has_snapshot": s.last_snapshot is not None,
             "snapshot_age": round(now - s.last_snapshot_ts, 1) if s.last_snapshot_ts else None,
+            # Live mic loudness, so the proctor can see who is talking at a
+            # glance without listening to every candidate in turn.
+            "audio_level": round(s.audio_level, 3) if s.audio_level is not None else None,
+            "audio_age": round(now - s.audio_ts, 1) if s.audio_ts else None,
+            "has_audio": s.audio_ts is not None,
+            "speaking": s.audio_speaking,
             "dropoffs": dropoffs,
             "flags": [
                 {"type": f.type, "detail": f.detail,

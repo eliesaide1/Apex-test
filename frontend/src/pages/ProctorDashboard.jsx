@@ -1,11 +1,104 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   fetchSessions, fetchAnswers, fetchFlags, dismissFlag, clearFlags,
   deleteSession, sendCandidateMessage, snapshotUrl, proctorWsUrl,
+  fetchAudioClips, fetchAudioClip,
   proctorLogin, getProctorToken, setProctorToken,
 } from "../api";
 
 const fmtTime = (ts) => new Date(ts * 1000).toLocaleTimeString();
+
+/**
+ * Listen in on one candidate's microphone.
+ *
+ * The candidate uploads short self-contained clips, so "live audio" here is
+ * just a play queue: poll for clips newer than the last one we played, fetch
+ * each as a blob, and play them back-to-back. Audio therefore runs roughly one
+ * clip (~4s) behind real time — fine for hearing whether someone is talking,
+ * and it needs no WebRTC/TURN infrastructure.
+ *
+ * Only one candidate can be audible at a time (`listeningId` in the dashboard),
+ * so there is exactly one queue and one <audio> element in flight.
+ */
+function useListen(sessionId) {
+  const [playing, setPlaying] = useState(false);
+  const [error, setError] = useState("");
+
+  useEffect(() => {
+    if (!sessionId) return;
+    const el = new Audio();
+    el.autoplay = false;
+    let stopped = false;
+    let lastSeq = 0;          // highest clip we have queued
+    let queue = [];           // object URLs waiting to play
+    let busy = false;         // an element is mid-playback
+
+    const playNext = () => {
+      if (stopped || busy) return;
+      const url = queue.shift();
+      if (!url) { setPlaying(false); return; }
+      busy = true;
+      setPlaying(true);
+      el.src = url;
+      el.play().catch(() => { setError("Click Listen again to allow audio."); });
+      el.onended = el.onerror = () => {
+        URL.revokeObjectURL(url);
+        busy = false;
+        playNext();
+      };
+    };
+
+    const poll = async () => {
+      if (stopped) return;
+      try {
+        const { clips } = await fetchAudioClips(sessionId, lastSeq);
+        // On first poll, start from the newest clip only — otherwise we would
+        // play out the whole backlog and fall ~40s behind immediately.
+        const wanted = lastSeq === 0 ? clips.slice(-1) : clips;
+        for (const c of wanted) {
+          if (stopped) return;
+          lastSeq = Math.max(lastSeq, c.seq);
+          try {
+            queue.push(URL.createObjectURL(await fetchAudioClip(sessionId, c.seq)));
+          } catch { /* clip aged out of the ring buffer — skip it */ }
+        }
+        if (lastSeq === 0 && clips.length === 0) lastSeq = 0;
+        setError("");
+        playNext();
+      } catch {
+        setError("No audio from this candidate yet.");
+      }
+    };
+
+    poll();
+    const id = setInterval(poll, 2000);
+    return () => {
+      stopped = true;
+      clearInterval(id);
+      el.pause();
+      el.src = "";
+      queue.forEach(URL.revokeObjectURL);
+      queue = [];
+    };
+  }, [sessionId]);
+
+  return { playing, error };
+}
+
+/** Mic loudness bar — lets a proctor spot talking without listening in.
+ *  `speaking` is the backend's own verdict (its threshold adapts per room), so
+ *  the bar never disagrees with what actually raises a flag. */
+function MicMeter({ level, age, speaking, listening }) {
+  const stale = age == null || age > 12;
+  const pct = stale ? 0 : Math.min(100, level * 320);
+  return (
+    <span className={`mic-meter wide ${!stale && speaking ? "loud" : ""} ${listening ? "on" : ""}`}
+          title={stale ? "No recent audio"
+                       : `Mic level ${level.toFixed(2)}${speaking ? " — talking" : ""}`}>
+      <span style={{ width: `${pct}%` }} />
+    </span>
+  );
+}
 
 /** Lists a candidate's warnings/flags; lets the proctor dismiss or clear them. */
 function WarningsModal({ session, onClose, onChanged }) {
@@ -286,7 +379,14 @@ export default function ProctorDashboard() {
   const [expandedId, setExpandedId] = useState(null);   // candidate camera shown large
   const [answersId, setAnswersId] = useState(null);     // candidate answers shown
   const [warningsId, setWarningsId] = useState(null);   // candidate warnings shown
+  const [listeningId, setListeningId] = useState(null); // candidate we can hear
   const wsRef = useRef(null);
+
+  // One candidate audible at a time — a room full of overlapping mics is
+  // unusable, and it keeps bandwidth to a single clip stream.
+  const listen = useListen(listeningId);
+  const toggleListen = useCallback(
+    (id) => setListeningId((cur) => (cur === id ? null : id)), []);
 
   const refresh = () => fetchSessions().then(setSessions).catch(() => {});
 
@@ -355,6 +455,16 @@ export default function ProctorDashboard() {
     <div className="dash">
       <header className="bar"><strong>Proctor dashboard</strong>
         <span className="muted">live · {sessions.filter((s) => s.online).length} online</span>
+        {listeningId && (
+          <span className={`listen-chip ${listen.playing ? "playing" : ""}`}>
+            <span aria-hidden="true">🔊</span>
+            Listening to <b>{sessions.find((s) => s.session_id === listeningId)
+              ?.candidate_name ?? "candidate"}</b>
+            {listen.error && <em className="listen-err">{listen.error}</em>}
+            <button className="ghost listen-stop"
+                    onClick={() => setListeningId(null)}>Stop</button>
+          </span>
+        )}
         <button className="ghost" style={{ marginLeft: "auto" }}
           onClick={() => { setProctorToken(""); setAuthed(false); }}>Sign out</button>
       </header>
@@ -372,9 +482,12 @@ export default function ProctorDashboard() {
               <CameraTile session={s} tick={tick}
                           onExpand={() => setExpandedId(s.session_id)} />
 
+              {/* Actions and the timeline are siblings of .cinfo, not children,
+                  so they span the card's full width instead of being squeezed
+                  into the narrow column beside the camera tile. */}
               <div className="cinfo">
                 <div className="chead">
-                  <strong>{s.candidate_name}</strong>
+                  <strong className="cname" title={s.candidate_name}>{s.candidate_name}</strong>
                   <span className={`dot ${s.submitted ? "done" :
                                    s.online ? "on" : "off"}`}>
                     {s.submitted ? "submitted" :
@@ -383,31 +496,47 @@ export default function ProctorDashboard() {
                 </div>
 
                 <div className="cstats">
-                  <span>Answered: {s.answered ?? 0}/{s.total_questions ?? "—"}</span>
+                  <span className="cstat">Answered <b>{s.answered ?? 0}/{s.total_questions ?? "—"}</b></span>
                   <button className={`flags-link ${high ? "hi" : ""}`}
                           disabled={!s.flags.length}
                           onClick={() => setWarningsId(s.session_id)}
                           title="Click to view / fix warnings">
-                    Flags: {s.flags.length}{high ? ` (${high} high)` : ""}
+                    Flags <b>{s.flags.length}</b>{high ? ` · ${high} high` : ""}
                   </button>
-                  <span>Last seen: {fmtTime(s.last_seen)}</span>
+                  <span className="cstat mic">
+                    Mic
+                    <MicMeter level={s.audio_level ?? 0} age={s.audio_age}
+                              speaking={s.speaking}
+                              listening={listeningId === s.session_id} />
+                  </span>
+                  <span className="cstat seen">Seen {fmtTime(s.last_seen)}</span>
                 </div>
+              </div>
 
-                <div className="card-actions">
-                  <button className="ghost view-answers"
-                          onClick={() => setAnswersId(s.session_id)}>
-                    📄 Answers
-                  </button>
-                  <button className="ghost msg-btn"
-                          onClick={() => messageCandidate(s)}>
-                    ✉ Message
-                  </button>
-                  <button className="ghost remove-btn"
-                          onClick={() => removeCandidate(s)}>
-                    ✕ Remove
-                  </button>
-                </div>
+              <div className="card-actions">
+                <button className={`ghost listen-btn ${listeningId === s.session_id ? "on" : ""}`}
+                        disabled={!s.has_audio}
+                        title={s.has_audio ? "Hear this candidate's microphone"
+                                           : "No microphone audio received yet"}
+                        onClick={() => toggleListen(s.session_id)}>
+                  <span aria-hidden="true">{listeningId === s.session_id ? "🔊" : "🎧"}</span>
+                  {listeningId === s.session_id ? " Listening" : " Listen"}
+                </button>
+                <button className="ghost view-answers"
+                        onClick={() => setAnswersId(s.session_id)}>
+                  <span aria-hidden="true">📄</span> Answers
+                </button>
+                <button className="ghost msg-btn"
+                        onClick={() => messageCandidate(s)}>
+                  <span aria-hidden="true">✉</span> Message
+                </button>
+                <button className="ghost remove-btn"
+                        onClick={() => removeCandidate(s)}>
+                  <span aria-hidden="true">✕</span> Remove
+                </button>
+              </div>
 
+              <div className="ctimeline">
                 <div className="do-title">Drop-off timeline</div>
                 <Dropoffs dropoffs={s.dropoffs} />
               </div>

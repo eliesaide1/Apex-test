@@ -68,6 +68,22 @@ export async function sendSnapshot(sessionId, blob) {
   }
 }
 
+// Upload one short mic clip (near-live listen-in for the proctor).
+export async function sendAudio(sessionId, blob, level, ms) {
+  try {
+    const fd = new FormData();
+    fd.append("session_id", sessionId);
+    fd.append("level", String(level));
+    fd.append("ms", String(ms));
+    fd.append("clip", blob, "clip.webm");
+    await fetch(`${BASE}/api/audio`, {
+      method: "POST", headers: { ...candidateAuth() }, body: fd,
+    });
+  } catch {
+    /* best-effort */
+  }
+}
+
 // Candidate polls for proctor messages (returns and clears them server-side).
 export async function fetchMessages(sessionId) {
   try {
@@ -189,6 +205,22 @@ export async function fetchAnswers(sessionId) {
   });
   if (!r.ok) throw new Error("Could not load answers");
   return r.json();
+}
+
+// Proctor: which mic clips are newer than `after`, and the bytes of one clip.
+export async function fetchAudioClips(sessionId, after) {
+  const r = await fetch(`${BASE}/api/audio/${sessionId}?after=${after}`, {
+    headers: { Authorization: `Bearer ${getProctorToken()}` },
+  });
+  if (!r.ok) throw new Error("Could not list audio");
+  return r.json();
+}
+export async function fetchAudioClip(sessionId, seq) {
+  const r = await fetch(`${BASE}/api/audio/${sessionId}/${seq}`, {
+    headers: { Authorization: `Bearer ${getProctorToken()}` },
+  });
+  if (!r.ok) throw new Error("Clip expired");
+  return r.blob();
 }
 
 export function proctorWsUrl() {

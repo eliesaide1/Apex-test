@@ -39,8 +39,8 @@ button:disabled { opacity: .5; cursor: not-allowed; }
 .exam { min-height: 100vh; position: relative; }
 .bar {
   position: sticky; top: 0; z-index: 5; display: flex; align-items: center;
-  justify-content: space-between; padding: 12px 20px; background: var(--panel);
-  border-bottom: 1px solid var(--line);
+  gap: 12px; justify-content: space-between; padding: 12px 20px;
+  background: var(--panel); border-bottom: 1px solid var(--line);
 }
 .bar-right { display: flex; align-items: center; gap: 10px; }
 .pill { font-size: 12px; padding: 4px 10px; border-radius: 999px;
@@ -145,6 +145,19 @@ button:disabled { opacity: .5; cursor: not-allowed; }
 .pill.cam-live { color: var(--ok); border-color: var(--ok); }
 .pill.cam-error { color: var(--high); border-color: var(--high); }
 
+/* microphone level meter — candidate header bar and proctor cards */
+.mic-meter { display: inline-block; vertical-align: middle; width: 34px; height: 6px;
+  margin-left: 6px; border-radius: 999px; background: #0d1020;
+  border: 1px solid var(--line); overflow: hidden; }
+.mic-meter > span { display: block; height: 100%; width: 0;
+  background: var(--ok); transition: width .1s linear; }
+/* NB: the modifier is `wide`, not `dash` — `.dash` is the dashboard's own root
+   container class, and its `min-height: 100vh` lands on anything that reuses
+   the name, which stretched this 6px bar to full viewport height. */
+.mic-meter.wide { width: 44px; }
+.mic-meter.wide.loud > span { background: var(--warn); }
+.mic-meter.wide.on { border-color: var(--ok); }
+
 /* webcam preview */
 .cam-preview { position: fixed; right: 16px; bottom: 16px; width: 160px;
   border: 2px solid var(--line); border-radius: 10px; overflow: hidden;
@@ -165,15 +178,19 @@ button:disabled { opacity: .5; cursor: not-allowed; }
 .small { font-size: 12px; }
 
 /* candidate cards */
-.cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(340px, 1fr));
+.cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(360px, 1fr));
   gap: 16px; max-width: 1200px; margin: 0 auto; padding: 20px; }
-.ccard { display: flex; gap: 12px; background: var(--panel);
-  border: 1px solid var(--line); border-radius: 12px; padding: 12px; }
+/* Two columns (camera | info) on the first row; actions and the timeline span
+   the full card width below, so buttons never overflow the narrow info column. */
+.ccard { display: grid; grid-template-columns: 132px minmax(0, 1fr);
+  gap: 12px; align-content: start; background: var(--panel);
+  border: 1px solid var(--line); border-radius: 12px; padding: 14px; }
+.ccard > .card-actions, .ccard > .ctimeline { grid-column: 1 / -1; }
 .ccard.has-high { border-color: var(--high); }
 .ccard.dropped { outline: 2px solid var(--high); animation: pulse 1.4s infinite; }
 @keyframes pulse { 0%,100% { outline-color: var(--high); } 50% { outline-color: transparent; } }
 
-.cam-tile { position: relative; width: 130px; height: 98px; flex: none;
+.cam-tile { position: relative; width: 132px; height: 99px; flex: none;
   background: #000; border-radius: 8px; overflow: hidden; cursor: pointer; }
 .cam-tile img { width: 100%; height: 100%; object-fit: cover; transform: scaleX(-1); }
 .cam-tile:hover { outline: 2px solid var(--accent); }
@@ -181,24 +198,36 @@ button:disabled { opacity: .5; cursor: not-allowed; }
   background: rgba(0,0,0,.55); border-radius: 4px; padding: 0 4px; opacity: 0; }
 .cam-tile:hover .cam-expand { opacity: 1; }
 .cam-tile.cam-none { display: grid; place-items: center; color: var(--muted);
-  font-size: 12px; border: 1px dashed var(--line); }
+  font-size: 12px; background: #0d1020; border: 1px dashed var(--line); cursor: default; }
 .cam-age { position: absolute; bottom: 2px; right: 4px; font-size: 10px;
   background: rgba(0,0,0,.6); padding: 1px 5px; border-radius: 4px; color: #cfd; }
 
-.cinfo { flex: 1; min-width: 0; }
-.chead { display: flex; align-items: center; justify-content: space-between; }
-.dot { font-size: 11px; padding: 3px 8px; border-radius: 999px; }
+.cinfo { min-width: 0; }
+.chead { display: flex; align-items: center; justify-content: space-between;
+  gap: 8px; }
+/* Long names truncate instead of shoving the status pill out of the card. */
+.cname { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dot { font-size: 11px; padding: 3px 8px; border-radius: 999px;
+  white-space: nowrap; flex: none; }
 .dot.on { color: var(--ok); border: 1px solid var(--ok); }
 .dot.off { color: var(--high); border: 1px solid var(--high); background: #2a1018; }
 .dot.done { color: var(--muted); border: 1px solid var(--line); }
-.cstats { display: flex; flex-wrap: wrap; gap: 4px 14px; font-size: 12px;
-  color: var(--muted); margin: 8px 0; }
-.cstats .hi { color: var(--high); }
-.flags-link { margin: 0; padding: 0; background: none; border: 0; color: var(--muted);
-  font: inherit; cursor: pointer; text-decoration: underline dotted; }
-.flags-link:hover:not(:disabled) { color: var(--accent); }
-.flags-link.hi { color: var(--high); }
-.flags-link:disabled { text-decoration: none; cursor: default; opacity: 1; }
+
+/* Stats read as small chips. Stacked rather than wrapped so every card is the
+   same height regardless of name length or flag count. */
+.cstats { display: flex; flex-direction: column; align-items: flex-start; gap: 5px;
+  font-size: 12px; color: var(--muted); margin: 9px 0 0; }
+.cstat, .flags-link { display: inline-flex; align-items: center; gap: 5px;
+  margin: 0; padding: 3px 9px; border-radius: 999px; background: #0d1020;
+  border: 1px solid var(--line); color: var(--muted); font: inherit;
+  line-height: 1.5; white-space: nowrap; }
+.cstat b, .flags-link b { color: var(--text); font-weight: 600; }
+.flags-link { cursor: pointer; text-decoration: none; }
+.flags-link:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }
+.flags-link.hi { color: var(--high); border-color: var(--high); background: #2a1018; }
+.flags-link.hi b { color: var(--high); }
+.flags-link:disabled { cursor: default; opacity: 1; }
+.cstats .seen { font-variant-numeric: tabular-nums; }
 
 /* warnings review rows */
 .warn-row { display: flex; align-items: center; gap: 10px; padding: 8px 4px;
@@ -212,8 +241,9 @@ button:disabled { opacity: .5; cursor: not-allowed; }
 .warn-type { flex: 1; min-width: 0; }
 .warn-x { margin: 0; padding: 3px 9px; }
 .warn-x:hover { border-color: var(--high); color: var(--high); }
+.ctimeline { border-top: 1px solid var(--line); padding-top: 10px; }
 .do-title { font-size: 11px; text-transform: uppercase; letter-spacing: .04em;
-  color: var(--muted); margin-top: 6px; }
+  color: var(--muted); }
 .dropoffs { list-style: none; margin: 4px 0 0; padding: 0; max-height: 96px;
   overflow-y: auto; }
 .dropoffs li { display: flex; gap: 8px; font-size: 12px; padding: 2px 0;
@@ -248,8 +278,15 @@ button:disabled { opacity: .5; cursor: not-allowed; }
   left: 0; right: 0; background: rgba(0,0,0,.5); z-index: 2; }
 .modal:fullscreen .modal-head { top: 0; } .modal:fullscreen .modal-foot { bottom: 0; }
 
-.card-actions { display: flex; gap: 8px; margin-top: 10px; }
-.card-actions .ghost { flex: 1; margin-top: 0; font-size: 13px; }
+/* Full-width action row. `min-width` keeps labels legible; the row wraps to a
+   second line on narrow cards rather than overflowing as it used to. */
+.card-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.card-actions .ghost { flex: 1 1 auto; min-width: 88px; margin-top: 0;
+  font-size: 13px; padding: 7px 10px; display: inline-flex; align-items: center;
+  justify-content: center; gap: 6px; white-space: nowrap; overflow: hidden; }
+.listen-btn.on { border-color: var(--ok); color: var(--ok); background: #0e2a1c; }
+.listen-btn:hover:not(:disabled) { border-color: var(--ok); color: var(--ok); }
+.listen-btn:disabled { opacity: .45; }
 .remove-btn:hover { border-color: var(--high); color: var(--high); }
 .msg-btn:hover { border-color: var(--accent); color: var(--accent); }
 
@@ -273,11 +310,24 @@ button:disabled { opacity: .5; cursor: not-allowed; }
   color: var(--text); margin: 0; user-select: text; }
 .ans-a.empty { color: var(--muted); font-style: italic; }
 
+/* "now listening" chip in the dashboard header */
+.listen-chip { display: inline-flex; align-items: center; gap: 8px; font-size: 12px;
+  color: var(--ok); border: 1px solid var(--ok); background: #0e2a1c;
+  border-radius: 999px; padding: 3px 4px 3px 12px; }
+.listen-chip.playing { animation: listen-pulse 1.6s ease-in-out infinite; }
+@keyframes listen-pulse { 0%,100% { opacity: 1; } 50% { opacity: .62; } }
+.listen-chip b { color: var(--text); font-weight: 600; }
+.listen-err { color: var(--warn); font-style: normal; }
+.listen-stop { margin-top: 0; padding: 2px 10px; font-size: 12px;
+  border-radius: 999px; }
+.listen-stop:hover { border-color: var(--high); color: var(--high); }
+
 /* live feed */
 .feedwrap { max-width: 1200px; margin: 0 auto; padding: 0 20px 40px; }
 .feed { list-style: none; margin: 0; padding: 0; }
-.feed-item { display: flex; gap: 8px; padding: 8px 10px;
-  border-bottom: 1px solid var(--line); font-size: 13px; }
+.feed-item { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 8px;
+  padding: 8px 10px; border-bottom: 1px solid var(--line); font-size: 13px; }
+.feed-item:last-child { border-bottom: 0; }
 .feed-time { color: var(--muted); font-variant-numeric: tabular-nums; }
 .feed-name { color: var(--accent); font-weight: 600; }
 .sev-high { border-left: 3px solid var(--high); }

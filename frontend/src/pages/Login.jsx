@@ -47,8 +47,10 @@ export default function Login() {
         </button>
 
         <div className="notice">
-          By starting you consent to webcam proctoring. The exam runs in
-          fullscreen; leaving it, switching tabs, or copying is logged.
+          By starting you consent to webcam <strong>and microphone</strong>{" "}
+          proctoring: your camera and audio are monitored live by a proctor for
+          the duration of the exam. The exam runs in fullscreen; leaving it,
+          switching tabs, copying, or talking is logged.
         </div>
       </form>
     </div>

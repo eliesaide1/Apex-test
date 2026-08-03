@@ -54,7 +54,7 @@ export default function Exam() {
     nav("/result");
   }, [answers, sid, submitting, nav]);
 
-  const { videoRef, canvasRef, camStatus, micStatus, camOn, micOn } = useWebcam(sid);
+  const { videoRef, canvasRef, camStatus, micStatus, camOn, micOn, micLevel } = useWebcam(sid);
   const mediaReady = camOn && micOn;
   // Only start counting navigation warnings once the exam is truly active
   // (camera + mic granted). This avoids false flags from the startup
@@ -176,7 +176,15 @@ export default function Exam() {
         <div className="bar-right">
           <span className={`pill ${warnings ? "warn" : ""}`}>Warnings {warnings}/{maxWarnings}</span>
           <span className={`pill ${camOn ? "cam-live" : "cam-error"}`}>Cam: {camOn ? "on" : "off"}</span>
-          <span className={`pill ${micOn ? "cam-live" : "cam-error"}`}>Mic: {micOn ? "on" : "off"}</span>
+          <span className={`pill ${micOn ? "cam-live" : "cam-error"}`}>
+            Mic: {micOn ? "on" : "off"}
+            {/* Live level, so the candidate can see their mic is being heard. */}
+            {micOn && (
+              <span className="mic-meter" title="Microphone level">
+                <span style={{ width: `${Math.min(100, micLevel * 320)}%` }} />
+              </span>
+            )}
+          </span>
           <span className="timer" title="Total time remaining">⏳ {mmss(timeLeft)}</span>
         </div>
       </header>
