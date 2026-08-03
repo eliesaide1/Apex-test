@@ -2,87 +2,125 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   fetchSessions, fetchAnswers, fetchFlags, dismissFlag, clearFlags,
   deleteSession, sendCandidateMessage, snapshotUrl, proctorWsUrl,
-  fetchAudioClips, fetchAudioClip,
+  fetchRtcConfig,
   proctorLogin, getProctorToken, setProctorToken,
 } from "../api";
 
 const fmtTime = (ts) => new Date(ts * 1000).toLocaleTimeString();
 
 /**
- * Listen in on one candidate's microphone.
+ * Watch and hear one candidate in real time, over WebRTC.
  *
- * The candidate uploads short self-contained clips, so "live audio" here is
- * just a play queue: poll for clips newer than the last one we played, fetch
- * each as a blob, and play them back-to-back. Audio therefore runs roughly one
- * clip (~4s) behind real time — fine for hearing whether someone is talking,
- * and it needs no WebRTC/TURN infrastructure.
+ * Media flows peer-to-peer straight from the candidate's browser, so this is
+ * sub-second for both video and audio — unlike the snapshot/clip pipeline,
+ * which stays running underneath as the always-on layer that feeds the card
+ * thumbnails, the mic meter and the talking detector for every candidate at
+ * once, and as the fallback when a peer connection can't be established.
  *
- * Only one candidate can be audible at a time (`listeningId` in the dashboard),
- * so there is exactly one queue and one <audio> element in flight.
+ * `wsRef` is the dashboard's existing proctor socket, reused as the signalling
+ * channel. Returns the live MediaStream plus a coarse connection state.
  */
-function useListen(sessionId) {
-  const [playing, setPlaying] = useState(false);
-  const [error, setError] = useState("");
+function useLiveFeed(sessionId, wsRef) {
+  const [stream, setStream] = useState(null);
+  const [state, setState] = useState("idle");   // idle|connecting|live|failed|unavailable
+  const pcRef = useRef(null);
 
   useEffect(() => {
-    if (!sessionId) return;
-    const el = new Audio();
-    el.autoplay = false;
-    let stopped = false;
-    let lastSeq = 0;          // highest clip we have queued
-    let queue = [];           // object URLs waiting to play
-    let busy = false;         // an element is mid-playback
+    if (!sessionId) { setStream(null); setState("idle"); return; }
 
-    const playNext = () => {
-      if (stopped || busy) return;
-      const url = queue.shift();
-      if (!url) { setPlaying(false); return; }
-      busy = true;
-      setPlaying(true);
-      el.src = url;
-      el.play().catch(() => { setError("Click Listen again to allow audio."); });
-      el.onended = el.onerror = () => {
-        URL.revokeObjectURL(url);
-        busy = false;
-        playNext();
-      };
-    };
+    let closed = false;
+    let pc = null;
+    const pending = [];        // ICE that arrives before the remote description
 
-    const poll = async () => {
-      if (stopped) return;
-      try {
-        const { clips } = await fetchAudioClips(sessionId, lastSeq);
-        // On first poll, start from the newest clip only — otherwise we would
-        // play out the whole backlog and fall ~40s behind immediately.
-        const wanted = lastSeq === 0 ? clips.slice(-1) : clips;
-        for (const c of wanted) {
-          if (stopped) return;
-          lastSeq = Math.max(lastSeq, c.seq);
-          try {
-            queue.push(URL.createObjectURL(await fetchAudioClip(sessionId, c.seq)));
-          } catch { /* clip aged out of the ring buffer — skip it */ }
-        }
-        if (lastSeq === 0 && clips.length === 0) lastSeq = 0;
-        setError("");
-        playNext();
-      } catch {
-        setError("No audio from this candidate yet.");
+    const send = (msg) => {
+      const ws = wsRef.current;
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({ ...msg, session_id: sessionId }));
       }
     };
 
-    poll();
-    const id = setInterval(poll, 2000);
-    return () => {
-      stopped = true;
-      clearInterval(id);
-      el.pause();
-      el.src = "";
-      queue.forEach(URL.revokeObjectURL);
-      queue = [];
-    };
-  }, [sessionId]);
+    async function onOffer(msg) {
+      const { iceServers } = await fetchRtcConfig().catch(() => ({ iceServers: [] }));
+      pc = new RTCPeerConnection({ iceServers });
+      pcRef.current = pc;
 
-  return { playing, error };
+      // We only receive; the candidate never hears the proctor.
+      pc.addTransceiver("video", { direction: "recvonly" });
+      pc.addTransceiver("audio", { direction: "recvonly" });
+
+      const incoming = new MediaStream();
+      pc.ontrack = (e) => {
+        incoming.addTrack(e.track);
+        setStream(incoming);
+      };
+      pc.onicecandidate = (e) => {
+        if (e.candidate) send({ kind: "rtc-ice", candidate: e.candidate.toJSON() });
+      };
+      pc.onconnectionstatechange = () => {
+        if (!pc || closed) return;
+        const s = pc.connectionState;
+        if (s === "connected") setState("live");
+        else if (s === "failed") setState("failed");
+        else if (s === "disconnected") setState("connecting");
+      };
+
+      await pc.setRemoteDescription({ type: "offer", sdp: msg.sdp });
+      for (const c of pending.splice(0)) {
+        await pc.addIceCandidate(c).catch(() => {});
+      }
+      const answer = await pc.createAnswer();
+      await pc.setLocalDescription(answer);
+      send({ kind: "rtc-answer", sdp: pc.localDescription.sdp });
+    }
+
+    const onMessage = async (e) => {
+      let msg;
+      try { msg = JSON.parse(e.data); } catch { return; }
+      if (msg.session_id && msg.session_id !== sessionId) return;
+
+      if (msg.kind === "rtc-offer") {
+        setState("connecting");
+        onOffer(msg).catch(() => setState("failed"));
+      } else if (msg.kind === "rtc-ice" && msg.candidate) {
+        if (pc && pc.remoteDescription) await pc.addIceCandidate(msg.candidate).catch(() => {});
+        else pending.push(msg.candidate);
+      } else if (msg.kind === "rtc-unavailable") {
+        setState("unavailable");
+      } else if (msg.kind === "rtc-ended") {
+        setState("idle");
+        setStream(null);
+      }
+    };
+
+    const ws = wsRef.current;
+    ws?.addEventListener("message", onMessage);
+    setState("connecting");
+    send({ kind: "rtc-watch" });
+
+    return () => {
+      closed = true;
+      ws?.removeEventListener("message", onMessage);
+      send({ kind: "rtc-stop" });
+      try { pcRef.current?.close(); } catch { /* already closed */ }
+      pcRef.current = null;
+      setStream(null);
+      setState("idle");
+    };
+  }, [sessionId, wsRef]);
+
+  return { stream, state };
+}
+
+/** Attaches a MediaStream to a <video>/<audio> element across re-renders. */
+function useAttachStream(stream) {
+  const ref = useRef(null);
+  useEffect(() => {
+    if (ref.current && ref.current.srcObject !== stream) {
+      ref.current.srcObject = stream || null;
+      if (stream) ref.current.play?.().catch(() => {});
+    }
+  }, [stream]);
+  return ref;
 }
 
 /** Mic loudness bar — lets a proctor spot talking without listening in.
@@ -305,9 +343,12 @@ function CameraTile({ session, tick, onExpand }) {
   );
 }
 
-/** Enlarged live camera overlay for one candidate, with a true-fullscreen toggle. */
-function CameraModal({ session, tick, onClose }) {
+/** Enlarged camera overlay. Shows the real-time WebRTC stream when it is up,
+ *  and falls back to the ~3s snapshot while it connects or if it can't. */
+function CameraModal({ session, tick, onClose, live }) {
   const ref = useRef(null);
+  const videoRef = useAttachStream(live?.stream);
+  const showLive = !!live?.stream && (live.state === "live" || live.state === "connecting");
 
   useEffect(() => {
     const onKey = (e) => e.key === "Escape" && onClose();
@@ -334,18 +375,32 @@ function CameraModal({ session, tick, onClose }) {
             </span>
           </div>
           <div className="modal-actions">
+            <span className={`rtc-state ${live?.state || "idle"}`}>
+              {live?.state === "live" ? "● REAL-TIME"
+                : live?.state === "connecting" ? "connecting…"
+                : live?.state === "failed" ? "peer connection failed"
+                : live?.state === "unavailable" ? "candidate offline"
+                : "snapshot"}
+            </span>
             <button className="ghost" onClick={goFullscreen}>⛶ Fullscreen</button>
             <button className="ghost" onClick={onClose}>✕ Close</button>
           </div>
         </div>
-        {session.has_snapshot ? (
+        {showLive ? (
+          <video className="modal-img" ref={videoRef} autoPlay playsInline />
+        ) : session.has_snapshot ? (
           <img className="modal-img" src={snapshotUrl(session.session_id, tick)} alt="candidate" />
         ) : (
           <div className="modal-img cam-none">no camera</div>
         )}
         <div className="modal-foot">
-          Live · updates every ~2.5s · frame {session.snapshot_age != null
-            ? `${Math.round(session.snapshot_age)}s old` : "—"} · Esc to close
+          {live?.state === "live"
+            ? "Real-time peer-to-peer video and audio · Esc to close"
+            : live?.state === "connecting"
+              ? `Negotiating the live connection — showing the latest snapshot (${
+                  session.snapshot_age != null ? `${Math.round(session.snapshot_age)}s old` : "—"}) · Esc to close`
+              : `Snapshot fallback · updates every ~2.5s · frame ${
+                  session.snapshot_age != null ? `${Math.round(session.snapshot_age)}s old` : "—"} · Esc to close`}
         </div>
       </div>
     </div>
@@ -379,12 +434,16 @@ export default function ProctorDashboard() {
   const [expandedId, setExpandedId] = useState(null);   // candidate camera shown large
   const [answersId, setAnswersId] = useState(null);     // candidate answers shown
   const [warningsId, setWarningsId] = useState(null);   // candidate warnings shown
-  const [listeningId, setListeningId] = useState(null); // candidate we can hear
+  const [listeningId, setListeningId] = useState(null); // candidate streamed live
   const wsRef = useRef(null);
 
-  // One candidate audible at a time — a room full of overlapping mics is
-  // unusable, and it keeps bandwidth to a single clip stream.
-  const listen = useListen(listeningId);
+  // One candidate live at a time — overlapping mics are unusable, and each live
+  // view costs that candidate an upstream video stream.
+  // Opening the enlarged camera also streams that candidate, so the modal and
+  // the Listen button share a single peer connection.
+  const liveId = expandedId || listeningId;
+  const live = useLiveFeed(liveId, wsRef);
+  const audioRef = useAttachStream(!expandedId ? live.stream : null);
   const toggleListen = useCallback(
     (id) => setListeningId((cur) => (cur === id ? null : id)), []);
 
@@ -443,9 +502,16 @@ export default function ProctorDashboard() {
 
     // WebSocket gives instant refresh on new events; the feed itself is derived
     // from the polled sessions, so a message just triggers an immediate reload.
+    // The same socket carries WebRTC signalling (see useLiveFeed) — those
+    // messages are not exam events, so they must not trigger a reload.
     const ws = new WebSocket(proctorWsUrl());
     wsRef.current = ws;
-    ws.onmessage = () => load();
+    ws.onmessage = (e) => {
+      try {
+        if (String(JSON.parse(e.data).kind || "").startsWith("rtc-")) return;
+      } catch { /* fall through and reload */ }
+      load();
+    };
     return () => { clearInterval(poll); clearInterval(cam); ws.close(); };
   }, [authed]);
 
@@ -455,12 +521,17 @@ export default function ProctorDashboard() {
     <div className="dash">
       <header className="bar"><strong>Proctor dashboard</strong>
         <span className="muted">live · {sessions.filter((s) => s.online).length} online</span>
-        {listeningId && (
-          <span className={`listen-chip ${listen.playing ? "playing" : ""}`}>
+        {listeningId && !expandedId && (
+          <span className={`listen-chip ${live.state === "live" ? "playing" : ""}`}>
             <span aria-hidden="true">🔊</span>
             Listening to <b>{sessions.find((s) => s.session_id === listeningId)
               ?.candidate_name ?? "candidate"}</b>
-            {listen.error && <em className="listen-err">{listen.error}</em>}
+            <em className="listen-err">
+              {live.state === "live" ? "real-time"
+                : live.state === "connecting" ? "connecting…"
+                : live.state === "failed" ? "connection failed"
+                : live.state === "unavailable" ? "candidate offline" : ""}
+            </em>
             <button className="ghost listen-stop"
                     onClick={() => setListeningId(null)}>Stop</button>
           </span>
@@ -515,9 +586,10 @@ export default function ProctorDashboard() {
 
               <div className="card-actions">
                 <button className={`ghost listen-btn ${listeningId === s.session_id ? "on" : ""}`}
-                        disabled={!s.has_audio}
-                        title={s.has_audio ? "Hear this candidate's microphone"
-                                           : "No microphone audio received yet"}
+                        disabled={!s.can_stream}
+                        title={s.can_stream
+                          ? "Hear this candidate live (real-time, peer-to-peer)"
+                          : "Candidate is not connected for live streaming"}
                         onClick={() => toggleListen(s.session_id)}>
                   <span aria-hidden="true">{listeningId === s.session_id ? "🔊" : "🎧"}</span>
                   {listeningId === s.session_id ? " Listening" : " Listen"}
@@ -561,8 +633,12 @@ export default function ProctorDashboard() {
         </ul>
       </section>
 
+      {/* Audio-only listening: the modal renders its own <video> (which carries
+          the audio), so this element is used only when the modal is closed. */}
+      <audio ref={audioRef} autoPlay style={{ display: "none" }} />
+
       {expanded && (
-        <CameraModal session={expanded} tick={tick}
+        <CameraModal session={expanded} tick={tick} live={live}
                      onClose={() => setExpandedId(null)} />
       )}
       {answersSession && (

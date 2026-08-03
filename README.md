@@ -16,6 +16,10 @@ React (Vite) SPA ──HTTP/JSON──> FastAPI backend ──> SQLite (sessions
    │  name watermark, key/copy blocks       ├── WebSocket /ws/proctor ─> Proctor dashboard (live flags)
    │  webcam snapshots ─────────────────────┤        ├── analyze_snapshot() stub (Phase 3: YOLO + MediaPipe)
    │  microphone clips ─────────────────────┘        └── analyze_audio() — flags sustained talking
+   │
+   └─ WebRTC ═══════════════════════════════════════════> Proctor dashboard
+      real-time video + audio, PEER-TO-PEER (never touches the server).
+      The server only relays SDP/ICE: /ws/candidate <-> /ws/proctor.
 ```
 
 In production the backend also **serves the built frontend**, so the whole app is a
@@ -30,22 +34,48 @@ single HTTPS origin (no CORS, no hardcoded backend URL, webcam works).
 
 Tokens are HMAC-signed with `SECRET_KEY` (no external JWT dependency).
 
-## Live audio monitoring
+## Live monitoring — two layers
 
-The proctor can **hear** each candidate, which is what catches someone reading
-the questions aloud to them or coaching them from off-camera.
+The dashboard runs two independent paths, and it matters which is which.
 
-**How it works.** The candidate's browser records the microphone as a chain of
-short (~4s) *self-contained* clips and uploads each one to `POST /api/audio`.
-The proctor's **Listen** button just plays those clips back-to-back as a queue,
-so audio runs roughly one clip behind real time. That is deliberate: it needs no
-WebRTC, no signalling server and no STUN/TURN, and it reuses the same request
-path as the webcam snapshots. Clips live in a small in-memory ring buffer
-(`AUDIO_CLIP_KEEP`, default 10 ≈ 40s) and are **never written to disk**.
+### 1. Real-time view (WebRTC) — one candidate at a time
 
-One candidate is audible at a time — overlapping mics are unusable, and it keeps
-the dashboard to a single clip stream. Every card also shows a **live mic level
-bar**, so a proctor can see who is talking without listening to each in turn.
+Click a candidate's camera tile (or **Listen** for audio only) and you get
+**sub-second video and audio**. Media flows **peer-to-peer** straight from the
+candidate's browser to yours; it never passes through this server. The server
+only relays the SDP offer/answer and ICE candidates over the WebSockets that
+already exist (`/ws/candidate` ↔ `/ws/proctor`).
+
+Measured on loopback: connection up in ~1s, 20fps, zero packet loss, 7ms video
+and 32ms audio jitter buffer. On a real network add the round-trip time, so
+expect well under 200ms. Compare the snapshot layer below, measured on the same
+candidate at the same moment: **2.9s** stale video, **1.8s** audio.
+
+Only one candidate streams at a time — each live view costs that candidate an
+upstream video stream, and overlapping mics are unusable. The enlarged view and
+the Listen button share a single peer connection.
+
+**NAT traversal.** STUN alone (the default) covers most home and office
+networks. It is *not* enough behind symmetric NAT or strict corporate
+firewalls; those need a TURN relay. Set `TURN_URL` / `TURN_USERNAME` /
+`TURN_CREDENTIAL` (Twilio, Cloudflare, Metered, or your own coturn) to cover
+them. Without TURN those candidates simply fall back to the snapshot view and
+the modal says *peer connection failed* — you are never silently shown a frozen
+picture.
+
+### 2. Always-on layer (snapshots + audio clips) — every candidate
+
+This is the older path and it deliberately stays: it runs for **all** candidates
+simultaneously, which a mesh of WebRTC streams could not. It feeds the card
+thumbnails (~3s), the mic level bars, and the automatic talking detection, and
+it is the fallback whenever a peer connection cannot be established.
+
+The candidate's browser records the microphone as a chain of short (~4s)
+*self-contained* clips and uploads each to `POST /api/audio`. Clips live in an
+in-memory ring buffer (`AUDIO_CLIP_KEEP`, default 10 ≈ 40s) and are **never
+written to disk**. Snapshots work the same way — latest frame only, in memory.
+
+Both layers run at once: opening a live view does not interrupt flag detection.
 
 **Automatic talking detection.** The browser measures each clip's loudness and
 sends it with the upload, so the backend never decodes audio. A clip counts as
@@ -79,6 +109,8 @@ note at the bottom of `proctoring.py`.
 - **Phase 2 (done):** Webcam capture + periodic snapshot upload to backend.
 - **Phase 2b (done):** Microphone capture, proctor listen-in, and adaptive
   talking detection (`analyze_audio`).
+- **Phase 2c (done):** Real-time peer-to-peer video + audio (WebRTC) for the
+  candidate a proctor is actively watching.
 - **Phase 3 (stub):** Swap the backend `analyze_snapshot` stub for real CV
   (YOLO for phone/second-person, MediaPipe for gaze/face-presence). Optionally
   add speaker diarization so `analyze_audio` can name a *second speaker*.
@@ -100,6 +132,9 @@ note at the bottom of `proctoring.py`.
 | `VOICE_FLOOR_MAX` | `0.05` | Ceiling on the learned noise floor. |
 | `VOICE_MIN_CLIPS` | `2` | Consecutive speech clips before a `voice_detected` flag. |
 | `VOICE_COOLDOWN` | `45` | Seconds before the same candidate can be flagged for talking again. |
+| `STUN_URLS` | Google STUN | Comma-separated STUN servers for the real-time view. |
+| `TURN_URL` | *(unset)* | TURN relay, needed for candidates behind symmetric NAT / strict firewalls. |
+| `TURN_USERNAME` / `TURN_CREDENTIAL` | *(unset)* | Credentials for that TURN server. |
 
 ## Run it locally
 

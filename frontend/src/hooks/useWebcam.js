@@ -40,6 +40,11 @@ export function useWebcam(sessionId, { intervalMs = 3000 } = {}) {
   const [camStatus, setCamStatus] = useState("idle");
   const [micStatus, setMicStatus] = useState("idle");
   const [micLevel, setMicLevel] = useState(0);
+  // The live (WebRTC) view needs these same tracks — see useLiveStream. Kept in
+  // a ref so handing it out never re-runs this effect and re-prompts for
+  // permission; `streamReady` is the state flag dependents can watch.
+  const streamRef = useRef(null);
+  const [streamReady, setStreamReady] = useState(false);
 
   useEffect(() => {
     if (!sessionId) return;
@@ -70,6 +75,9 @@ export function useWebcam(sessionId, { intervalMs = 3000 } = {}) {
           },
         });
         if (cancelled) { stream.getTracks().forEach((t) => t.stop()); return; }
+
+        streamRef.current = stream;
+        setStreamReady(true);
 
         if (videoRef.current) {
           videoRef.current.srcObject = stream;
@@ -185,10 +193,13 @@ export function useWebcam(sessionId, { intervalMs = 3000 } = {}) {
       stopClips?.();
       audioCtx?.close?.().catch(() => {});
       stream?.getTracks().forEach((t) => t.stop());
+      streamRef.current = null;
+      setStreamReady(false);
     };
   }, [sessionId, intervalMs]);
 
   const camOn = camStatus === "live";
   const micOn = micStatus === "live";
-  return { videoRef, canvasRef, camStatus, micStatus, camOn, micOn, micLevel };
+  return { videoRef, canvasRef, camStatus, micStatus, camOn, micOn, micLevel,
+           streamRef, streamReady };
 }

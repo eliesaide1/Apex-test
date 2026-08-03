@@ -3,6 +3,7 @@ import { useNavigate } from "react-router-dom";
 import { submit, saveAnswer, sendFlag, fetchMessages } from "../api";
 import { useProctoring, enterFullscreen } from "../hooks/useProctoring";
 import { useWebcam } from "../hooks/useWebcam";
+import { useLiveStream } from "../hooks/useLiveStream";
 import Watermark from "../components/Watermark.jsx";
 
 const mmss = (secs) => {
@@ -54,7 +55,10 @@ export default function Exam() {
     nav("/result");
   }, [answers, sid, submitting, nav]);
 
-  const { videoRef, canvasRef, camStatus, micStatus, camOn, micOn, micLevel } = useWebcam(sid);
+  const { videoRef, canvasRef, camStatus, micStatus, camOn, micOn, micLevel,
+          streamRef, streamReady } = useWebcam(sid);
+  // Publishes the same tracks peer-to-peer when a proctor opens the live view.
+  const { live } = useLiveStream(sid, streamRef, streamReady);
   const mediaReady = camOn && micOn;
   // Only start counting navigation warnings once the exam is truly active
   // (camera + mic granted). This avoids false flags from the startup
@@ -282,6 +286,8 @@ export default function Exam() {
       <div className="cam-preview">
         <video ref={videoRef} muted playsInline />
         <canvas ref={canvasRef} style={{ display: "none" }} />
+        {/* Tell the candidate when a proctor is actually watching live. */}
+        {live && <div className="live-badge" title="A proctor is watching live">● LIVE</div>}
         {(camStatus === "denied" || camStatus === "error") &&
           <div className="cam-msg">Camera {camStatus}</div>}
       </div>

@@ -14,7 +14,13 @@ Proctor endpoints (require a proctor bearer token, issued at /api/proctor/login)
     GET  /api/snapshot/{id}      -> latest webcam frame
     GET  /api/audio/{id}         -> mic clips newer than ?after= (listen-in queue)
     GET  /api/audio/{id}/{seq}   -> one mic clip's bytes
-    WS   /ws/proctor?token=...   -> live stream of flags
+    WS   /ws/proctor?token=...   -> live flags + WebRTC signalling
+
+Real-time viewing is peer-to-peer WebRTC (sub-second video AND audio). The
+server only relays SDP/ICE between /ws/candidate and /ws/proctor; no media
+passes through it.
+    WS   /ws/candidate?token=... -> candidate's signalling socket
+    GET  /api/rtc-config         -> ICE servers (STUN, optional TURN)
 
 The built frontend is served from FRONTEND_DIST so the whole app is one origin.
 """
@@ -86,6 +92,73 @@ class ProctorHub:
 
 
 hub = ProctorHub()
+
+
+# --------------------------------------------------------------------------- #
+# WebRTC signalling relay
+#
+# The live view is peer-to-peer: audio and video go straight from the
+# candidate's browser to the proctor's, so it is real time (sub-second) and none
+# of it passes through this server. All we do here is post SDP offers/answers
+# and ICE candidates between the two sockets.
+#
+# The periodic snapshot + audio-clip pipeline stays as it is. It is what keeps
+# the mic meter and the talking detector running for EVERY candidate at once,
+# and it is the fallback whenever a peer connection cannot be established.
+# WebRTC is the on-demand "watch this one candidate live" layer on top.
+# --------------------------------------------------------------------------- #
+class Signalling:
+    def __init__(self) -> None:
+        self._candidates: dict[str, WebSocket] = {}   # session_id -> candidate
+        self._watchers: dict[str, WebSocket] = {}     # session_id -> proctor
+
+    # --- registration ------------------------------------------------------ #
+    def add_candidate(self, session_id: str, ws: WebSocket) -> None:
+        self._candidates[session_id] = ws
+
+    def drop_candidate(self, session_id: str, ws: WebSocket) -> None:
+        if self._candidates.get(session_id) is ws:
+            self._candidates.pop(session_id, None)
+
+    def drop_proctor(self, ws: WebSocket) -> None:
+        for sid in [s for s, w in self._watchers.items() if w is ws]:
+            self._watchers.pop(sid, None)
+
+    def is_live(self, session_id: str) -> bool:
+        return session_id in self._candidates
+
+    # --- routing ----------------------------------------------------------- #
+    async def _send(self, ws: WebSocket | None, message: dict) -> bool:
+        if ws is None:
+            return False
+        try:
+            await ws.send_text(json.dumps(message))
+            return True
+        except Exception:
+            return False
+
+    async def to_candidate(self, session_id: str, message: dict) -> bool:
+        return await self._send(self._candidates.get(session_id), message)
+
+    async def to_watcher(self, session_id: str, message: dict) -> bool:
+        return await self._send(self._watchers.get(session_id), message)
+
+    async def watch(self, session_id: str, proctor: WebSocket) -> bool:
+        """A proctor asks to see one candidate live. Only one watcher per
+        candidate: a second proctor taking over simply replaces the first."""
+        self._watchers[session_id] = proctor
+        ok = await self.to_candidate(session_id, {"kind": "rtc-start"})
+        if not ok:
+            self._watchers.pop(session_id, None)
+        return ok
+
+    async def unwatch(self, session_id: str, proctor: WebSocket) -> None:
+        if self._watchers.get(session_id) is proctor:
+            self._watchers.pop(session_id, None)
+            await self.to_candidate(session_id, {"kind": "rtc-stop"})
+
+
+signalling = Signalling()
 
 
 def _flag_event(session: store.Session, flag: store.Flag) -> dict:
@@ -334,6 +407,8 @@ async def sessions(_: dict = Depends(require_proctor)):
             "audio_age": round(now - s.audio_ts, 1) if s.audio_ts else None,
             "has_audio": s.audio_ts is not None,
             "speaking": s.audio_speaking,
+            # Candidate's signalling socket is open => a live view can be set up.
+            "can_stream": signalling.is_live(s.id),
             "dropoffs": dropoffs,
             "flags": [
                 {"type": f.type, "detail": f.detail,
@@ -433,9 +508,83 @@ async def ws_proctor(ws: WebSocket, token: str | None = None):
     await hub.connect(ws)
     try:
         while True:
-            await ws.receive_text()   # keep-alive; we don't expect client msgs
+            raw = await ws.receive_text()
+            try:
+                msg = json.loads(raw)
+            except ValueError:
+                continue                      # keep-alive ping or junk
+            kind = msg.get("kind")
+            sid = msg.get("session_id")
+            if not sid:
+                continue
+
+            if kind == "rtc-watch":
+                if not await signalling.watch(sid, ws):
+                    await ws.send_text(json.dumps({
+                        "kind": "rtc-unavailable", "session_id": sid,
+                        "detail": "Candidate is not connected for live streaming",
+                    }))
+            elif kind == "rtc-stop":
+                await signalling.unwatch(sid, ws)
+            elif kind in ("rtc-answer", "rtc-ice"):
+                # Pass the proctor's answer / ICE straight to that candidate.
+                await signalling.to_candidate(sid, {**msg, "kind": kind})
     except WebSocketDisconnect:
+        pass
+    finally:
         hub.disconnect(ws)
+        signalling.drop_proctor(ws)
+
+
+@app.websocket("/ws/candidate")
+async def ws_candidate(ws: WebSocket, token: str | None = None):
+    """Candidate's signalling socket — the only way a live view can be set up.
+
+    Carries no media and no exam data: purely SDP/ICE relayed to whichever
+    proctor is currently watching this session.
+    """
+    try:
+        payload = verify_token(token or "")
+        if payload.get("role") != "candidate":
+            raise HTTPException(status_code=403, detail="Candidate role required")
+    except HTTPException:
+        await ws.close(code=1008)
+        return
+
+    sid = payload.get("sub") or ""
+    if store.get_session(sid) is None:
+        await ws.close(code=1008)
+        return
+
+    await ws.accept()
+    signalling.add_candidate(sid, ws)
+    try:
+        while True:
+            raw = await ws.receive_text()
+            try:
+                msg = json.loads(raw)
+            except ValueError:
+                continue
+            kind = msg.get("kind")
+            if kind in ("rtc-offer", "rtc-ice"):
+                # The session id comes from the TOKEN, never from the message,
+                # so a candidate cannot inject signalling into another session.
+                await signalling.to_watcher(sid, {**msg, "kind": kind,
+                                                  "session_id": sid})
+    except WebSocketDisconnect:
+        pass
+    finally:
+        signalling.drop_candidate(sid, ws)
+        await signalling.to_watcher(sid, {"kind": "rtc-ended", "session_id": sid})
+
+
+@app.get("/api/rtc-config")
+async def rtc_config(authorization: str | None = Header(default=None)):
+    """ICE servers for both peers. Any valid token (either role) may read it."""
+    if not authorization or not authorization.lower().startswith("bearer "):
+        raise HTTPException(status_code=401, detail="Missing bearer token")
+    verify_token(authorization[7:].strip())
+    return {"iceServers": config.ice_servers()}
 
 
 @app.get("/api/health")

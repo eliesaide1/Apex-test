@@ -67,3 +67,35 @@ VOICE_FLOOR_MAX: float = float(_get("VOICE_FLOOR_MAX", "0.05"))
 VOICE_MIN_CLIPS: int = int(_get("VOICE_MIN_CLIPS", "2"))
 # Seconds to wait before flagging the same session for talking again.
 VOICE_COOLDOWN: int = int(_get("VOICE_COOLDOWN", "45"))
+
+# --- WebRTC live streaming ------------------------------------------------- #
+# The live view is peer-to-peer: media never touches this server, only the SDP
+# offer/answer and ICE candidates are relayed over the existing WebSockets.
+#
+# STUN lets each peer discover its public address; that is enough for the large
+# majority of home and office networks. It is NOT enough behind symmetric NAT or
+# strict corporate firewalls, where the media path has to be relayed by a TURN
+# server. Set TURN_URL/TURN_USERNAME/TURN_CREDENTIAL (Twilio, Cloudflare,
+# Metered, or your own coturn) to cover those candidates; without it they fall
+# back to the snapshot view automatically.
+STUN_URLS: list[str] = [
+    u.strip() for u in _get(
+        "STUN_URLS",
+        "stun:stun.l.google.com:19302,stun:stun1.l.google.com:19302",
+    ).split(",") if u.strip()
+]
+TURN_URL: str = _get("TURN_URL", "").strip()
+TURN_USERNAME: str = _get("TURN_USERNAME", "").strip()
+TURN_CREDENTIAL: str = _get("TURN_CREDENTIAL", "").strip()
+
+
+def ice_servers() -> list[dict]:
+    """ICE server list handed to both browsers (see /api/rtc-config)."""
+    servers: list[dict] = [{"urls": STUN_URLS}] if STUN_URLS else []
+    if TURN_URL:
+        servers.append({
+            "urls": [u.strip() for u in TURN_URL.split(",") if u.strip()],
+            "username": TURN_USERNAME,
+            "credential": TURN_CREDENTIAL,
+        })
+    return servers

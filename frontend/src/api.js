@@ -227,6 +227,22 @@ export function proctorWsUrl() {
   return `${wsBase()}/ws/proctor?token=${encodeURIComponent(getProctorToken())}`;
 }
 
+// --- WebRTC live view ----------------------------------------------------- //
+// Signalling only: SDP + ICE. Media goes peer-to-peer, never via the server.
+export function candidateWsUrl() {
+  return `${wsBase()}/ws/candidate?token=${encodeURIComponent(candidateToken())}`;
+}
+
+// ICE servers (STUN, plus TURN if configured). Works for either role.
+export async function fetchRtcConfig() {
+  const token = getProctorToken() || candidateToken();
+  const r = await fetch(`${BASE}/api/rtc-config`, {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  if (!r.ok) throw new Error("Could not load ICE config");
+  return r.json();
+}
+
 // Live-frame URL for the proctor view. `bust` forces the browser to refetch.
 export function snapshotUrl(sessionId, bust) {
   return `${BASE}/api/snapshot/${sessionId}?t=${bust}&token=${encodeURIComponent(getProctorToken())}`;
