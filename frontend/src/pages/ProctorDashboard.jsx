@@ -44,9 +44,11 @@ function useLiveFeed(sessionId, wsRef) {
       pc = new RTCPeerConnection({ iceServers });
       pcRef.current = pc;
 
-      // We only receive; the candidate never hears the proctor.
-      pc.addTransceiver("video", { direction: "recvonly" });
-      pc.addTransceiver("audio", { direction: "recvonly" });
+      // Do NOT pre-add transceivers here. Applying the remote offer creates
+      // them, already recvonly because we add no local tracks of our own — and
+      // pre-adding produced a second, dead pair (getReceivers() showed four
+      // entries for two tracks). The candidate never hears the proctor either
+      // way: we never attach a track to send.
 
       const incoming = new MediaStream();
       pc.ontrack = (e) => {
@@ -111,16 +113,49 @@ function useLiveFeed(sessionId, wsRef) {
   return { stream, state };
 }
 
-/** Attaches a MediaStream to a <video>/<audio> element across re-renders. */
+/** Attaches a MediaStream to a muted <video>. Muted elements are never blocked
+ *  by the autoplay policy; all audio goes through useAudioSink instead. */
 function useAttachStream(stream) {
   const ref = useRef(null);
   useEffect(() => {
-    if (ref.current && ref.current.srcObject !== stream) {
-      ref.current.srcObject = stream || null;
-      if (stream) ref.current.play?.().catch(() => {});
-    }
+    const el = ref.current;
+    if (!el) return;
+    if (el.srcObject !== stream) el.srcObject = stream || null;
+    if (stream) el.play?.().catch(() => {});
   }, [stream]);
   return ref;
+}
+
+/**
+ * The single element that actually makes sound, wherever the live view is shown.
+ *
+ * Browsers refuse to start audio without a user gesture, and a rejected play()
+ * is easy to swallow — which is exactly what made "Listen" look connected while
+ * being completely silent. So the rejection is surfaced as `blocked`, and the
+ * UI offers a button that calls play() straight from a real click.
+ */
+function useAudioSink(stream) {
+  const ref = useRef(null);
+  const [blocked, setBlocked] = useState(false);
+
+  useEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    if (el.srcObject !== stream) el.srcObject = stream || null;
+    if (!stream) { setBlocked(false); return; }
+    el.muted = false;
+    el.volume = 1;
+    el.play().then(() => setBlocked(false)).catch(() => setBlocked(true));
+  }, [stream]);
+
+  const enable = () => {
+    const el = ref.current;
+    if (!el) return;
+    el.muted = false;
+    el.play().then(() => setBlocked(false)).catch(() => setBlocked(true));
+  };
+
+  return { ref, blocked, enable };
 }
 
 /** Mic loudness bar — lets a proctor spot talking without listening in.
@@ -329,15 +364,25 @@ function ProctorLogin({ onAuthed }) {
   );
 }
 
-/** Live webcam thumbnail for one candidate — refreshes on a timer. Click to expand. */
-function CameraTile({ session, tick, onExpand }) {
-  if (!session.has_snapshot) {
+/** Candidate thumbnail. Shows the real-time stream while this candidate is
+ *  live, otherwise the periodic snapshot (which is ~3s behind by design). */
+function CameraTile({ session, tick, onExpand, live }) {
+  const showLive = !!live?.stream;
+  const videoRef = useAttachStream(showLive ? live.stream : null);
+
+  if (!showLive && !session.has_snapshot) {
     return <div className="cam-tile cam-none">no camera</div>;
   }
   return (
     <div className="cam-tile" onClick={onExpand} title="Click to enlarge">
-      <img src={snapshotUrl(session.session_id, tick)} alt="candidate" />
-      <span className="cam-age">{Math.round(session.snapshot_age)}s ago</span>
+      {showLive
+        // Muted on purpose — sound comes from the single audio sink, so it
+        // can never double up with the enlarged view.
+        ? <video ref={videoRef} autoPlay playsInline muted />
+        : <img src={snapshotUrl(session.session_id, tick)} alt="candidate" />}
+      <span className={`cam-age ${showLive ? "live" : ""}`}>
+        {showLive ? "● LIVE" : `${Math.round(session.snapshot_age)}s ago`}
+      </span>
       <span className="cam-expand">⛶</span>
     </div>
   );
@@ -387,7 +432,8 @@ function CameraModal({ session, tick, onClose, live }) {
           </div>
         </div>
         {showLive ? (
-          <video className="modal-img" ref={videoRef} autoPlay playsInline />
+          // Muted: audio comes from the dashboard's single audio sink.
+          <video className="modal-img" ref={videoRef} autoPlay playsInline muted />
         ) : session.has_snapshot ? (
           <img className="modal-img" src={snapshotUrl(session.session_id, tick)} alt="candidate" />
         ) : (
@@ -443,7 +489,8 @@ export default function ProctorDashboard() {
   // the Listen button share a single peer connection.
   const liveId = expandedId || listeningId;
   const live = useLiveFeed(liveId, wsRef);
-  const audioRef = useAttachStream(!expandedId ? live.stream : null);
+  // Exactly one element makes sound, whether or not the enlarged view is open.
+  const audio = useAudioSink(live.stream);
   const toggleListen = useCallback(
     (id) => setListeningId((cur) => (cur === id ? null : id)), []);
 
@@ -521,10 +568,10 @@ export default function ProctorDashboard() {
     <div className="dash">
       <header className="bar"><strong>Proctor dashboard</strong>
         <span className="muted">live · {sessions.filter((s) => s.online).length} online</span>
-        {listeningId && !expandedId && (
-          <span className={`listen-chip ${live.state === "live" ? "playing" : ""}`}>
+        {liveId && (
+          <span className={`listen-chip ${live.state === "live" && !audio.blocked ? "playing" : ""}`}>
             <span aria-hidden="true">🔊</span>
-            Listening to <b>{sessions.find((s) => s.session_id === listeningId)
+            Live: <b>{sessions.find((s) => s.session_id === liveId)
               ?.candidate_name ?? "candidate"}</b>
             <em className="listen-err">
               {live.state === "live" ? "real-time"
@@ -532,8 +579,17 @@ export default function ProctorDashboard() {
                 : live.state === "failed" ? "connection failed"
                 : live.state === "unavailable" ? "candidate offline" : ""}
             </em>
+            {/* Browsers block audio until the page has been interacted with.
+                Never swallow that — offer the click that unblocks it. */}
+            {audio.blocked && (
+              <button className="ghost sound-blocked" onClick={audio.enable}>
+                🔇 Sound blocked — click to enable
+              </button>
+            )}
             <button className="ghost listen-stop"
-                    onClick={() => setListeningId(null)}>Stop</button>
+                    onClick={() => { setListeningId(null); setExpandedId(null); }}>
+              Stop
+            </button>
           </span>
         )}
         <button className="ghost" style={{ marginLeft: "auto" }}
@@ -551,6 +607,7 @@ export default function ProctorDashboard() {
             <div key={s.session_id}
                  className={`ccard ${dropped ? "dropped" : ""} ${high ? "has-high" : ""}`}>
               <CameraTile session={s} tick={tick}
+                          live={liveId === s.session_id ? live : null}
                           onExpand={() => setExpandedId(s.session_id)} />
 
               {/* Actions and the timeline are siblings of .cinfo, not children,
@@ -585,14 +642,20 @@ export default function ProctorDashboard() {
               </div>
 
               <div className="card-actions">
-                <button className={`ghost listen-btn ${listeningId === s.session_id ? "on" : ""}`}
+                {/* Reflects the real connection state, so a failed peer
+                    connection can never look like a working one. */}
+                <button className={`ghost listen-btn ${liveId === s.session_id ? "on" : ""}`}
                         disabled={!s.can_stream}
                         title={s.can_stream
-                          ? "Hear this candidate live (real-time, peer-to-peer)"
+                          ? "Watch and hear this candidate in real time"
                           : "Candidate is not connected for live streaming"}
                         onClick={() => toggleListen(s.session_id)}>
-                  <span aria-hidden="true">{listeningId === s.session_id ? "🔊" : "🎧"}</span>
-                  {listeningId === s.session_id ? " Listening" : " Listen"}
+                  <span aria-hidden="true">{liveId === s.session_id ? "🔴" : "▶"}</span>
+                  {liveId !== s.session_id ? " Live"
+                    : live.state === "live" ? (audio.blocked ? " Muted" : " Live")
+                    : live.state === "connecting" ? " Connecting…"
+                    : live.state === "failed" ? " Failed"
+                    : live.state === "unavailable" ? " Offline" : " Live"}
                 </button>
                 <button className="ghost view-answers"
                         onClick={() => setAnswersId(s.session_id)}>
@@ -633,9 +696,9 @@ export default function ProctorDashboard() {
         </ul>
       </section>
 
-      {/* Audio-only listening: the modal renders its own <video> (which carries
-          the audio), so this element is used only when the modal is closed. */}
-      <audio ref={audioRef} autoPlay style={{ display: "none" }} />
+      {/* The one element that makes sound. Every <video> on this page is muted
+          so audio can never double up or be lost between views. */}
+      <audio ref={audio.ref} autoPlay playsInline style={{ display: "none" }} />
 
       {expanded && (
         <CameraModal session={expanded} tick={tick} live={live}
