@@ -178,11 +178,11 @@ button:disabled { opacity: .5; cursor: not-allowed; }
 .small { font-size: 12px; }
 
 /* candidate cards */
-.cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(360px, 1fr));
+.cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(390px, 1fr));
   gap: 16px; max-width: 1200px; margin: 0 auto; padding: 20px; }
 /* Two columns (camera | info) on the first row; actions and the timeline span
    the full card width below, so buttons never overflow the narrow info column. */
-.ccard { display: grid; grid-template-columns: 132px minmax(0, 1fr);
+.ccard { display: grid; grid-template-columns: 164px minmax(0, 1fr);
   gap: 12px; align-content: start; background: var(--panel);
   border: 1px solid var(--line); border-radius: 12px; padding: 14px; }
 .ccard > .card-actions, .ccard > .ctimeline { grid-column: 1 / -1; }
@@ -190,7 +190,7 @@ button:disabled { opacity: .5; cursor: not-allowed; }
 .ccard.dropped { outline: 2px solid var(--high); animation: pulse 1.4s infinite; }
 @keyframes pulse { 0%,100% { outline-color: var(--high); } 50% { outline-color: transparent; } }
 
-.cam-tile { position: relative; width: 132px; height: 99px; flex: none;
+.cam-tile { position: relative; width: 164px; height: 123px; flex: none;
   background: #000; border-radius: 8px; overflow: hidden; cursor: pointer; }
 .cam-tile img { width: 100%; height: 100%; object-fit: cover; transform: scaleX(-1); }
 .cam-tile:hover { outline: 2px solid var(--accent); }
@@ -313,6 +313,13 @@ button:disabled { opacity: .5; cursor: not-allowed; }
   border-radius: 8px; padding: 12px 14px; font: 13px/1.5 system-ui, sans-serif;
   color: var(--text); margin: 0; user-select: text; }
 .ans-a.empty { color: var(--muted); font-style: italic; }
+
+/* live connection readout — resolution / fps / bitrate / rtt */
+.live-stats { font-variant-numeric: tabular-nums; font-style: normal;
+  white-space: nowrap; }
+.live-stats .bad { color: var(--high); }
+.live-stats .relay { color: var(--warn); }
+.live-stats .ramp { color: var(--accent); font-weight: 600; }
 
 /* real-time (WebRTC) connection state */
 .rtc-state { font-size: 11px; text-transform: uppercase; letter-spacing: .05em;

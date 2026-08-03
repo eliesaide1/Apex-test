@@ -56,9 +56,10 @@ export default function Exam() {
   }, [answers, sid, submitting, nav]);
 
   const { videoRef, canvasRef, camStatus, micStatus, camOn, micOn, micLevel,
-          streamRef, streamReady } = useWebcam(sid);
-  // Publishes the same tracks peer-to-peer when a proctor opens the live view.
-  const { live } = useLiveStream(sid, streamRef, streamReady);
+          streamRef, streamReady, pausedRef } = useWebcam(sid);
+  // Publishes the same tracks peer-to-peer when a proctor opens the live view,
+  // and pauses snapshot uploads while it does so they don't fight for uplink.
+  const { live } = useLiveStream(sid, streamRef, streamReady, pausedRef);
   const mediaReady = camOn && micOn;
   // Only start counting navigation warnings once the exam is truly active
   // (camera + mic granted). This avoids false flags from the startup

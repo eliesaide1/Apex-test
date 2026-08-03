@@ -45,6 +45,8 @@ export function useWebcam(sessionId, { intervalMs = 3000 } = {}) {
   // permission; `streamReady` is the state flag dependents can watch.
   const streamRef = useRef(null);
   const [streamReady, setStreamReady] = useState(false);
+  // Set while a live WebRTC view is up, to suspend snapshot uploads.
+  const pausedRef = useRef(false);
 
   useEffect(() => {
     if (!sessionId) return;
@@ -61,7 +63,19 @@ export function useWebcam(sessionId, { intervalMs = 3000 } = {}) {
     (async () => {
       try {
         stream = await navigator.mediaDevices.getUserMedia({
-          video: { width: 320, height: 240 },
+          // Capture at 720p/30 for the real-time view. This used to be a
+          // hardcoded 320x240 because the only consumer was a JPEG thumbnail —
+          // once WebRTC started publishing the same track, that tiny, low
+          // frame-rate source was exactly why the live view looked poor. The
+          // snapshot path downscales on its own canvas instead (see capture),
+          // so raising this does not inflate the uploads.
+          // `ideal` rather than `exact`: a webcam that cannot do 720p still
+          // works, it just negotiates the closest mode it has.
+          video: {
+            width: { ideal: 1280 },
+            height: { ideal: 720 },
+            frameRate: { ideal: 30, min: 15 },
+          },
           // Capture the room as it actually sounds. Chrome enables noise
           // suppression and automatic gain control by default, which is right
           // for a call and wrong for proctoring: AGC winds the level down
@@ -107,11 +121,21 @@ export function useWebcam(sessionId, { intervalMs = 3000 } = {}) {
       }
     })();
 
+    // Thumbnail size for the proctor grid. The camera now runs at 720p, so the
+    // snapshot is downscaled here rather than by crippling the capture: the
+    // uploads stay ~20KB while the live stream gets a full-quality source.
+    const SNAP_W = 480;
+
     function capture() {
       const v = videoRef.current, c = canvasRef.current;
       if (!v || !c || v.videoWidth === 0) return;
-      c.width = v.videoWidth;
-      c.height = v.videoHeight;
+      // Skip snapshots while a proctor is watching live — they are already
+      // seeing better, and on a weak uplink these uploads compete with the
+      // WebRTC stream for bandwidth, which shows up as stutter.
+      if (pausedRef.current) return;
+      const scale = Math.min(1, SNAP_W / v.videoWidth);
+      c.width = Math.round(v.videoWidth * scale);
+      c.height = Math.round(v.videoHeight * scale);
       c.getContext("2d").drawImage(v, 0, 0, c.width, c.height);
       c.toBlob((blob) => blob && sendSnapshot(sessionId, blob), "image/jpeg", 0.7);
     }
@@ -201,5 +225,5 @@ export function useWebcam(sessionId, { intervalMs = 3000 } = {}) {
   const camOn = camStatus === "live";
   const micOn = micStatus === "live";
   return { videoRef, canvasRef, camStatus, micStatus, camOn, micOn, micLevel,
-           streamRef, streamReady };
+           streamRef, streamReady, pausedRef };
 }

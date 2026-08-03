@@ -23,7 +23,57 @@ const fmtTime = (ts) => new Date(ts * 1000).toLocaleTimeString();
 function useLiveFeed(sessionId, wsRef) {
   const [stream, setStream] = useState(null);
   const [state, setState] = useState("idle");   // idle|connecting|live|failed|unavailable
+  const [stats, setStats] = useState(null);
   const pcRef = useRef(null);
+
+  // Poll the browser's own WebRTC stats so picture quality and delay are
+  // visible numbers rather than a matter of opinion. This is also what tells
+  // you whether a poor picture is the network (low bitrate, loss, relayed) or
+  // the far end simply not sending much.
+  useEffect(() => {
+    if (!sessionId) { setStats(null); return; }
+    let last = null;
+    const id = setInterval(async () => {
+      const pc = pcRef.current;
+      if (!pc) return;
+      let report;
+      try { report = await pc.getStats(); } catch { return; }
+      const next = {};
+      report.forEach((r) => {
+        if (r.type === "inbound-rtp" && r.kind === "video") {
+          next.w = r.frameWidth; next.h = r.frameHeight;
+          next.fps = r.framesPerSecond;
+          next.videoBytes = r.bytesReceived;
+          next.lost = r.packetsLost;
+          next.recv = r.packetsReceived;
+          next.jitterMs = r.jitterBufferDelay && r.jitterBufferEmittedCount
+            ? (r.jitterBufferDelay / r.jitterBufferEmittedCount) * 1000 : null;
+        }
+        if (r.type === "inbound-rtp" && r.kind === "audio") {
+          next.audioBytes = r.bytesReceived;
+        }
+        if (r.type === "candidate-pair" && r.nominated && r.state === "succeeded") {
+          next.rttMs = r.currentRoundTripTime != null
+            ? r.currentRoundTripTime * 1000 : null;
+          // candidate-pair carries IDs, not the types themselves — reading
+          // r.localCandidateType directly just yields undefined.
+          next.localType = report.get(r.localCandidateId)?.candidateType;
+          next.remoteType = report.get(r.remoteCandidateId)?.candidateType;
+        }
+      });
+      // Bitrate needs two samples.
+      const totalBytes = (next.videoBytes || 0) + (next.audioBytes || 0);
+      const now = Date.now();
+      if (last && now > last.t) {
+        next.kbps = Math.round(((totalBytes - last.bytes) * 8) / (now - last.t));
+      }
+      last = { t: now, bytes: totalBytes };
+      // "relay" on either end means the media is going through a TURN server.
+      next.relayed = next.localType === "relay" || next.remoteType === "relay";
+      setStats(next);
+    }, 1000);
+    return () => clearInterval(id);
+  }, [sessionId]);
 
   useEffect(() => {
     if (!sessionId) { setStream(null); setState("idle"); return; }
@@ -110,7 +160,29 @@ function useLiveFeed(sessionId, wsRef) {
     };
   }, [sessionId, wsRef]);
 
-  return { stream, state };
+  return { stream, state, stats };
+}
+
+/** One-line readout of what the live connection is actually delivering. */
+function LiveStats({ stats, state }) {
+  if (state !== "live" || !stats) return null;
+  const loss = stats.recv
+    ? ((stats.lost || 0) / (stats.recv + (stats.lost || 0)) * 100) : 0;
+  return (
+    <span className="live-stats">
+      {stats.w ? `${stats.w}×${stats.h}` : "—"}
+      {stats.fps != null && ` · ${Math.round(stats.fps)}fps`}
+      {stats.kbps != null && ` · ${stats.kbps > 1000
+        ? (stats.kbps / 1000).toFixed(1) + " Mbps" : stats.kbps + " kbps"}`}
+      {stats.rttMs != null && ` · ${Math.round(stats.rttMs)}ms rtt`}
+      {loss > 0.5 && <b className="bad"> · {loss.toFixed(1)}% loss</b>}
+      {stats.relayed && <b className="relay"> · TURN relay</b>}
+      {/* WebRTC's congestion controller probes upward from a low bitrate, so a
+          fresh connection spends ~15s below full resolution. Say so, otherwise
+          a picture that is still climbing reads as a broken one. */}
+      {stats.w > 0 && stats.w < 1280 && <b className="ramp"> · sharpening…</b>}
+    </span>
+  );
 }
 
 /** Attaches a MediaStream to a muted <video>. Muted elements are never blocked
@@ -441,7 +513,7 @@ function CameraModal({ session, tick, onClose, live }) {
         )}
         <div className="modal-foot">
           {live?.state === "live"
-            ? "Real-time peer-to-peer video and audio · Esc to close"
+            ? <>Real-time peer-to-peer · <LiveStats stats={live.stats} state={live.state} /> · Esc to close</>
             : live?.state === "connecting"
               ? `Negotiating the live connection — showing the latest snapshot (${
                   session.snapshot_age != null ? `${Math.round(session.snapshot_age)}s old` : "—"}) · Esc to close`
@@ -491,8 +563,23 @@ export default function ProctorDashboard() {
   const live = useLiveFeed(liveId, wsRef);
   // Exactly one element makes sound, whether or not the enlarged view is open.
   const audio = useAudioSink(live.stream);
-  const toggleListen = useCallback(
-    (id) => setListeningId((cur) => (cur === id ? null : id)), []);
+  // Going live opens the enlarged view too — a 132px thumbnail is not what
+  // anyone means by "watch the candidate".
+  const goLive = useCallback((id) => {
+    setListeningId(id);
+    setExpandedId(id);
+  }, []);
+  const stopLive = useCallback(() => {
+    setListeningId(null);
+    setExpandedId(null);
+  }, []);
+  const toggleListen = useCallback((id) => {
+    setListeningId((cur) => {
+      if (cur === id) { setExpandedId(null); return null; }
+      setExpandedId(id);
+      return id;
+    });
+  }, []);
 
   const refresh = () => fetchSessions().then(setSessions).catch(() => {});
 
@@ -574,7 +661,7 @@ export default function ProctorDashboard() {
             Live: <b>{sessions.find((s) => s.session_id === liveId)
               ?.candidate_name ?? "candidate"}</b>
             <em className="listen-err">
-              {live.state === "live" ? "real-time"
+              {live.state === "live" ? <LiveStats stats={live.stats} state={live.state} />
                 : live.state === "connecting" ? "connecting…"
                 : live.state === "failed" ? "connection failed"
                 : live.state === "unavailable" ? "candidate offline" : ""}
@@ -586,10 +673,11 @@ export default function ProctorDashboard() {
                 🔇 Sound blocked — click to enable
               </button>
             )}
-            <button className="ghost listen-stop"
-                    onClick={() => { setListeningId(null); setExpandedId(null); }}>
-              Stop
-            </button>
+            {!expandedId && (
+              <button className="ghost listen-stop"
+                      onClick={() => setExpandedId(liveId)}>Show video</button>
+            )}
+            <button className="ghost listen-stop" onClick={stopLive}>Stop</button>
           </span>
         )}
         <button className="ghost" style={{ marginLeft: "auto" }}
@@ -606,9 +694,13 @@ export default function ProctorDashboard() {
           return (
             <div key={s.session_id}
                  className={`ccard ${dropped ? "dropped" : ""} ${high ? "has-high" : ""}`}>
+              {/* Clicking the tile also marks the candidate live, so closing
+                  the enlarged view keeps the peer connection up. Tearing it
+                  down would mean sitting through the encoder's ramp-up to full
+                  resolution again on every reopen. */}
               <CameraTile session={s} tick={tick}
                           live={liveId === s.session_id ? live : null}
-                          onExpand={() => setExpandedId(s.session_id)} />
+                          onExpand={() => goLive(s.session_id)} />
 
               {/* Actions and the timeline are siblings of .cinfo, not children,
                   so they span the card's full width instead of being squeezed
