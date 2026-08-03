@@ -163,7 +163,13 @@ export function useLiveStream(sessionId, streamRef, streamReady, pausedRef) {
         try { msg = JSON.parse(e.data); } catch { return; }
 
         if (msg.kind === "rtc-start") {
-          startPeer().catch(() => closePeer());
+          // Tell the proctor when we cannot publish. Swallowing this meant the
+          // offer was simply never sent, and their dashboard waited on a
+          // connection that was never coming.
+          startPeer().catch((err) => {
+            send({ kind: "rtc-error", detail: String(err?.message || err).slice(0, 200) });
+            closePeer();
+          });
         } else if (msg.kind === "rtc-stop") {
           closePeer();
         } else if (msg.kind === "rtc-answer" && pc) {

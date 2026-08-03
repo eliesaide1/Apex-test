@@ -343,6 +343,11 @@ video.modal-img { display: block; }
 @keyframes listen-pulse { 0%,100% { opacity: 1; } 50% { opacity: .62; } }
 .listen-chip b { color: var(--text); font-weight: 600; }
 .listen-err { color: var(--warn); font-style: normal; }
+
+/* Signalling channel down — the live view cannot work until it is back. */
+.ws-down { font-size: 12px; color: var(--warn); border: 1px solid var(--warn);
+  background: #2a220e; border-radius: 999px; padding: 3px 12px;
+  white-space: nowrap; }
 .listen-stop { margin-top: 0; padding: 2px 10px; font-size: 12px;
   border-radius: 999px; }
 .listen-stop:hover { border-color: var(--high); color: var(--high); }

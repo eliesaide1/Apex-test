@@ -566,7 +566,10 @@ async def ws_candidate(ws: WebSocket, token: str | None = None):
             except ValueError:
                 continue
             kind = msg.get("kind")
-            if kind in ("rtc-offer", "rtc-ice"):
+            # rtc-error lets the candidate say "I could not publish" instead of
+            # simply never sending an offer, which left the proctor's dashboard
+            # waiting out a timeout with nothing to show for it.
+            if kind in ("rtc-offer", "rtc-ice", "rtc-error"):
                 # The session id comes from the TOKEN, never from the message,
                 # so a candidate cannot inject signalling into another session.
                 await signalling.to_watcher(sid, {**msg, "kind": kind,

@@ -1,12 +1,18 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   fetchSessions, fetchAnswers, fetchFlags, dismissFlag, clearFlags,
-  deleteSession, sendCandidateMessage, snapshotUrl, proctorWsUrl,
+  deleteSession, sendCandidateMessage, snapshotUrl,
   fetchRtcConfig,
   proctorLogin, getProctorToken, setProctorToken,
 } from "../api";
+import { useSignalling } from "../hooks/useSignalling";
 
 const fmtTime = (ts) => new Date(ts * 1000).toLocaleTimeString();
+
+/** How long a negotiation may sit unfinished before we retry it. */
+const NEGOTIATION_TIMEOUT_MS = 12000;
+/** How many times to re-issue the watch request before reporting failure. */
+const MAX_NEGOTIATION_RETRIES = 2;
 
 /**
  * Watch and hear one candidate in real time, over WebRTC.
@@ -20,10 +26,11 @@ const fmtTime = (ts) => new Date(ts * 1000).toLocaleTimeString();
  * `wsRef` is the dashboard's existing proctor socket, reused as the signalling
  * channel. Returns the live MediaStream plus a coarse connection state.
  */
-function useLiveFeed(sessionId, wsRef) {
+function useLiveFeed(sessionId, wsRef, sendSignal, generation) {
   const [stream, setStream] = useState(null);
   const [state, setState] = useState("idle");   // idle|connecting|live|failed|unavailable
   const [stats, setStats] = useState(null);
+  const [reason, setReason] = useState("");     // why it is not live, in words
   const pcRef = useRef(null);
 
   // Poll the browser's own WebRTC stats so picture quality and delay are
@@ -76,17 +83,47 @@ function useLiveFeed(sessionId, wsRef) {
   }, [sessionId]);
 
   useEffect(() => {
-    if (!sessionId) { setStream(null); setState("idle"); return; }
+    if (!sessionId) { setStream(null); setState("idle"); setReason(""); return; }
 
     let closed = false;
     let pc = null;
+    let attempt = 0;
+    let watchdog = null;
     const pending = [];        // ICE that arrives before the remote description
 
-    const send = (msg) => {
-      const ws = wsRef.current;
-      if (ws && ws.readyState === WebSocket.OPEN) {
-        ws.send(JSON.stringify({ ...msg, session_id: sessionId }));
-      }
+    // Queued when the socket is down, so a reconnect delivers it rather than
+    // the message vanishing. rtc-watch is the exception: this effect re-issues
+    // it on every new socket generation, so queueing it too would start a
+    // second, overlapping negotiation.
+    const send = (msg, opts) => sendSignal({ ...msg, session_id: sessionId }, opts);
+
+    const dropPeer = () => {
+      try { pc?.close(); } catch { /* already closed */ }
+      pc = null;
+      pcRef.current = null;
+      pending.length = 0;
+      setStream(null);
+    };
+
+    // Nothing in WebRTC guarantees a stalled negotiation ever resolves, and the
+    // old code set no deadline at all: one lost signalling message left this
+    // view on "connecting…" indefinitely, with no retry and nothing said. Give
+    // it a deadline, retry, then state plainly what failed.
+    const armWatchdog = () => {
+      clearTimeout(watchdog);
+      watchdog = setTimeout(() => {
+        if (closed || pc?.connectionState === "connected") return;
+        if (attempt < MAX_NEGOTIATION_RETRIES) {
+          attempt += 1;
+          setReason(`no response yet — retrying (${attempt}/${MAX_NEGOTIATION_RETRIES})`);
+          dropPeer();
+          send({ kind: "rtc-watch" }, { queue: false });
+          armWatchdog();
+        } else {
+          setState("failed");
+          setReason("the candidate's browser never completed the connection");
+        }
+      }, NEGOTIATION_TIMEOUT_MS);
     };
 
     async function onOffer(msg) {
@@ -111,9 +148,14 @@ function useLiveFeed(sessionId, wsRef) {
       pc.onconnectionstatechange = () => {
         if (!pc || closed) return;
         const s = pc.connectionState;
-        if (s === "connected") setState("live");
-        else if (s === "failed") setState("failed");
-        else if (s === "disconnected") setState("connecting");
+        if (s === "connected") {
+          clearTimeout(watchdog);        // negotiation succeeded; stop retrying
+          setState("live");
+          setReason("");
+        } else if (s === "failed") {
+          setState("failed");
+          setReason("no network path between the two browsers (ICE failed)");
+        } else if (s === "disconnected") setState("connecting");
       };
 
       await pc.setRemoteDescription({ type: "offer", sdp: msg.sdp });
@@ -132,35 +174,59 @@ function useLiveFeed(sessionId, wsRef) {
 
       if (msg.kind === "rtc-offer") {
         setState("connecting");
-        onOffer(msg).catch(() => setState("failed"));
+        // Report what actually went wrong instead of a bare "failed" — a
+        // rejected SDP and an unreachable peer used to look identical here.
+        onOffer(msg).catch((err) => {
+          setState("failed");
+          setReason(`could not apply the candidate's offer: ${err?.message || err}`);
+        });
       } else if (msg.kind === "rtc-ice" && msg.candidate) {
         if (pc && pc.remoteDescription) await pc.addIceCandidate(msg.candidate).catch(() => {});
         else pending.push(msg.candidate);
+      } else if (msg.kind === "rtc-error") {
+        // The candidate's browser failed to build or publish its offer. Without
+        // this it simply never sent one and we waited out the clock.
+        clearTimeout(watchdog);
+        setState("failed");
+        setReason(msg.detail ? `candidate side: ${msg.detail}` : "the candidate's browser could not start streaming");
       } else if (msg.kind === "rtc-unavailable") {
+        clearTimeout(watchdog);
         setState("unavailable");
+        setReason("the candidate's exam page is not connected");
       } else if (msg.kind === "rtc-ended") {
+        clearTimeout(watchdog);
         setState("idle");
+        setReason("");
         setStream(null);
       }
     };
 
+    // Bind to the CURRENT socket. `generation` changes whenever the signalling
+    // hook reconnects, which re-runs this effect so the listener follows the
+    // new socket and the watch request is re-issued — previously the listener
+    // stayed attached to a dead socket and nothing ever arrived again.
     const ws = wsRef.current;
     ws?.addEventListener("message", onMessage);
     setState("connecting");
-    send({ kind: "rtc-watch" });
+    setReason("");
+    attempt = 0;
+    send({ kind: "rtc-watch" }, { queue: false });
+    armWatchdog();
 
     return () => {
       closed = true;
+      clearTimeout(watchdog);
       ws?.removeEventListener("message", onMessage);
-      send({ kind: "rtc-stop" });
+      send({ kind: "rtc-stop" }, { queue: false });
       try { pcRef.current?.close(); } catch { /* already closed */ }
       pcRef.current = null;
       setStream(null);
       setState("idle");
+      setReason("");
     };
-  }, [sessionId, wsRef]);
+  }, [sessionId, wsRef, sendSignal, generation]);
 
-  return { stream, state, stats };
+  return { stream, state, stats, reason };
 }
 
 /** One-line readout of what the live connection is actually delivering. */
@@ -515,9 +581,11 @@ function CameraModal({ session, tick, onClose, live }) {
           {live?.state === "live"
             ? <>Real-time peer-to-peer · <LiveStats stats={live.stats} state={live.state} /> · Esc to close</>
             : live?.state === "connecting"
-              ? `Negotiating the live connection — showing the latest snapshot (${
+              ? `Negotiating the live connection${live?.reason ? ` — ${live.reason}` : ""} — showing the latest snapshot (${
                   session.snapshot_age != null ? `${Math.round(session.snapshot_age)}s old` : "—"}) · Esc to close`
-              : `Snapshot fallback · updates every ~2.5s · frame ${
+              /* The fallback used to describe itself without ever saying why
+                 the real-time view was unavailable. */
+              : `Snapshot fallback${live?.reason ? ` — ${live.reason}` : ""} · updates every ~2.5s · frame ${
                   session.snapshot_age != null ? `${Math.round(session.snapshot_age)}s old` : "—"} · Esc to close`}
         </div>
       </div>
@@ -553,14 +621,33 @@ export default function ProctorDashboard() {
   const [answersId, setAnswersId] = useState(null);     // candidate answers shown
   const [warningsId, setWarningsId] = useState(null);   // candidate warnings shown
   const [listeningId, setListeningId] = useState(null); // candidate streamed live
-  const wsRef = useRef(null);
+
+  const load = useCallback(
+    () => fetchSessions().then(setSessions).catch((e) => {
+      if (e.message === "unauthorized") setAuthed(false);
+    }),
+    [],
+  );
+
+  // The signalling socket also carries the live flag feed. WebRTC messages are
+  // not exam events, so they must not trigger a session reload.
+  const onSignal = useCallback((e) => {
+    try {
+      if (String(JSON.parse(e.data).kind || "").startsWith("rtc-")) return;
+    } catch { /* fall through and reload */ }
+    load();
+  }, [load]);
+
+  // Owns the socket: pings it, reconnects it, and queues sends across the gap.
+  const { wsRef, send: sendSignal, generation: wsGen, connected: wsConnected } =
+    useSignalling(authed, onSignal);
 
   // One candidate live at a time — overlapping mics are unusable, and each live
   // view costs that candidate an upstream video stream.
   // Opening the enlarged camera also streams that candidate, so the modal and
   // the Listen button share a single peer connection.
   const liveId = expandedId || listeningId;
-  const live = useLiveFeed(liveId, wsRef);
+  const live = useLiveFeed(liveId, wsRef, sendSignal, wsGen);
   // Exactly one element makes sound, whether or not the enlarged view is open.
   const audio = useAudioSink(live.stream);
   // Going live opens the enlarged view too — a 132px thumbnail is not what
@@ -624,30 +711,16 @@ export default function ProctorDashboard() {
     } catch { /* ignore */ }
   }
 
+  // Presence and camera frames come from HTTP polling; the socket (above) only
+  // makes updates arrive sooner. Keeping them independent is deliberate — it is
+  // why the dashboard still shows accurate cards when signalling is down.
   useEffect(() => {
     if (!authed) return;
-    const load = () =>
-      fetchSessions().then(setSessions).catch((e) => {
-        if (e.message === "unauthorized") setAuthed(false);
-      });
     load();
     const poll = setInterval(load, 3000);          // refresh presence + drop-offs
     const cam = setInterval(() => setTick((t) => t + 1), 2500); // refresh camera frames
-
-    // WebSocket gives instant refresh on new events; the feed itself is derived
-    // from the polled sessions, so a message just triggers an immediate reload.
-    // The same socket carries WebRTC signalling (see useLiveFeed) — those
-    // messages are not exam events, so they must not trigger a reload.
-    const ws = new WebSocket(proctorWsUrl());
-    wsRef.current = ws;
-    ws.onmessage = (e) => {
-      try {
-        if (String(JSON.parse(e.data).kind || "").startsWith("rtc-")) return;
-      } catch { /* fall through and reload */ }
-      load();
-    };
-    return () => { clearInterval(poll); clearInterval(cam); ws.close(); };
-  }, [authed]);
+    return () => { clearInterval(poll); clearInterval(cam); };
+  }, [authed, load]);
 
   if (!authed) return <ProctorLogin onAuthed={() => setAuthed(true)} />;
 
@@ -655,16 +728,28 @@ export default function ProctorDashboard() {
     <div className="dash">
       <header className="bar"><strong>Proctor dashboard</strong>
         <span className="muted">live · {sessions.filter((s) => s.online).length} online</span>
+        {/* The live view cannot work without this socket, and it used to fail
+            invisibly — the cards kept updating over HTTP while every attempt to
+            watch a candidate hung on "connecting…". */}
+        {!wsConnected && (
+          <span className="ws-down" title="The live-view signalling channel is down. Cards still update over HTTP.">
+            ⚠ signalling offline — reconnecting…
+          </span>
+        )}
         {liveId && (
           <span className={`listen-chip ${live.state === "live" && !audio.blocked ? "playing" : ""}`}>
             <span aria-hidden="true">🔊</span>
             Live: <b>{sessions.find((s) => s.session_id === liveId)
               ?.candidate_name ?? "candidate"}</b>
             <em className="listen-err">
-              {live.state === "live" ? <LiveStats stats={live.stats} state={live.state} />
-                : live.state === "connecting" ? "connecting…"
-                : live.state === "failed" ? "connection failed"
-                : live.state === "unavailable" ? "candidate offline" : ""}
+              {live.state === "live"
+                ? <LiveStats stats={live.stats} state={live.state} />
+                /* Say WHY, not just that it failed — a dead signalling socket
+                   and an unreachable peer are different problems. */
+                : live.reason
+                  || (live.state === "connecting" ? "connecting…"
+                    : live.state === "failed" ? "connection failed"
+                    : live.state === "unavailable" ? "candidate offline" : "")}
             </em>
             {/* Browsers block audio until the page has been interacted with.
                 Never swallow that — offer the click that unblocks it. */}
