@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { candidateWsUrl, fetchRtcConfig } from "../api";
 
 /**
@@ -76,11 +76,33 @@ function boostStartBitrate(sdp, { start = 1500, min = 600, max = 2500 } = {}) {
  * flows peer-to-peer, never through the server. That is what makes it real time
  * rather than the ~3s snapshot cadence.
  *
- * We only ever send; nothing from the proctor is played back to the candidate,
- * so this cannot be used to talk to them.
+ * Audio is asymmetric on purpose. The candidate's camera and mic go up
+ * continuously for as long as a proctor is watching. The return direction
+ * carries nothing until the proctor holds their push-to-talk button, and the
+ * candidate has no way to talk back: there is no button on this side, and this
+ * hook never sends `rtc-talk`. So the candidate hears the proctor only while
+ * the proctor chooses to be heard.
+ *
+ * `talkRef` is a shared {on, lastAt} record the mic pipeline reads, so clips
+ * recorded while the proctor was speaking are not judged as the candidate
+ * talking (see useWebcam).
  */
-export function useLiveStream(sessionId, streamRef, streamReady, pausedRef) {
+export function useLiveStream(sessionId, streamRef, streamReady, pausedRef, talkRef) {
   const [live, setLive] = useState(false);
+  // The proctor's voice. Rendered by the exam page as a plain <audio>.
+  const proctorAudioRef = useRef(null);
+  const [proctorTalking, setProctorTalking] = useState(false);
+  const [audioBlocked, setAudioBlocked] = useState(false);
+
+  // Browsers can refuse to start audio without a user gesture. Never swallow
+  // that: the exam page offers a click that retries playback from a real one.
+  const playProctorAudio = useCallback(() => {
+    const el = proctorAudioRef.current;
+    if (!el || !el.srcObject) return;
+    el.muted = false;
+    el.volume = 1;
+    el.play().then(() => setAudioBlocked(false)).catch(() => setAudioBlocked(true));
+  }, []);
 
   useEffect(() => {
     if (!sessionId || !streamReady) return;
@@ -89,13 +111,25 @@ export function useLiveStream(sessionId, streamRef, streamReady, pausedRef) {
 
     const setPaused = (v) => { if (pausedRef) pausedRef.current = v; };
 
+    const setTalking = (on) => {
+      if (talkRef) talkRef.current = { on, lastAt: Date.now() };
+      setProctorTalking(on);
+    };
+
     const closePeer = () => {
       if (pc) {
         try { pc.close(); } catch { /* already gone */ }
         pc = null;
       }
+      const el = proctorAudioRef.current;
+      if (el) el.srcObject = null;
       setPaused(false);
       setLive(false);
+      // The proctor cannot still be talking to us with the connection gone —
+      // leaving this set would suppress the candidate's own talking detection
+      // for the rest of the exam.
+      setTalking(false);
+      setAudioBlocked(false);
     };
 
     const send = (msg) => {
@@ -110,7 +144,18 @@ export function useLiveStream(sessionId, streamRef, streamReady, pausedRef) {
       const { iceServers } = await fetchRtcConfig().catch(() => ({ iceServers: [] }));
       pc = new RTCPeerConnection({ iceServers });
 
-      // Send-only: the proctor watches, the candidate hears nothing back.
+      // The proctor's voice arrives on the return direction of the audio
+      // m-line, which they enable when answering. Nothing plays until they
+      // actually hold their talk button — until then that direction carries no
+      // track at all — so this cannot be used to listen in on the proctor.
+      pc.ontrack = (e) => {
+        if (e.track.kind !== "audio") return;
+        const el = proctorAudioRef.current;
+        if (!el) return;
+        el.srcObject = e.streams[0] || new MediaStream([e.track]);
+        playProctorAudio();
+      };
+
       stream.getTracks().forEach((t) => {
         // Tell the encoder this is moving footage, not a slide deck, so it
         // spends its budget on frame rate instead of still-frame sharpness.
@@ -177,6 +222,11 @@ export function useLiveStream(sessionId, streamRef, streamReady, pausedRef) {
             .catch(() => {});
         } else if (msg.kind === "rtc-ice" && pc && msg.candidate) {
           await pc.addIceCandidate(msg.candidate).catch(() => {});
+        } else if (msg.kind === "rtc-talk") {
+          setTalking(!!msg.on);
+          // A track that arrived while playback was blocked stays silent until
+          // something calls play() again; a fresh press is the natural moment.
+          if (msg.on) playProctorAudio();
         }
       };
 
@@ -199,7 +249,8 @@ export function useLiveStream(sessionId, streamRef, streamReady, pausedRef) {
       closePeer();
       try { ws?.close(); } catch { /* ignore */ }
     };
-  }, [sessionId, streamRef, streamReady]);
+  }, [sessionId, streamRef, streamReady, talkRef, playProctorAudio]);
 
-  return { live };
+  return { live, proctorAudioRef, proctorTalking, audioBlocked,
+           enableProctorAudio: playProctorAudio };
 }

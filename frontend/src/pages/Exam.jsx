@@ -55,11 +55,19 @@ export default function Exam() {
     nav("/result");
   }, [answers, sid, submitting, nav]);
 
+  // Shared between the two hooks below: useLiveStream writes it when the proctor
+  // presses or releases push-to-talk, useWebcam reads it so the proctor's voice
+  // coming out of this candidate's speakers is never counted as the candidate
+  // talking. Declared here because useWebcam is created first.
+  const talkRef = useRef({ on: false, lastAt: 0 });
   const { videoRef, canvasRef, camStatus, micStatus, camOn, micOn, micLevel,
-          streamRef, streamReady, pausedRef } = useWebcam(sid);
+          streamRef, streamReady, pausedRef } = useWebcam(sid, { talkRef });
   // Publishes the same tracks peer-to-peer when a proctor opens the live view,
   // and pauses snapshot uploads while it does so they don't fight for uplink.
-  const { live } = useLiveStream(sid, streamRef, streamReady, pausedRef);
+  // Also plays the proctor's voice, but only while they hold their talk button.
+  const { live, proctorAudioRef, proctorTalking, audioBlocked,
+          enableProctorAudio } = useLiveStream(sid, streamRef, streamReady,
+                                               pausedRef, talkRef);
   const mediaReady = camOn && micOn;
   // Only start counting navigation warnings once the exam is truly active
   // (camera + mic granted). This avoids false flags from the startup
@@ -197,6 +205,21 @@ export default function Exam() {
       <div className="credits-strip">
         {session.exam.org} · {session.exam.authors?.map((a) => `${a.name} (${a.role})`).join(" · ")}
       </div>
+
+      {/* The proctor's voice. Silent unless they are holding push-to-talk —
+          there is no control here to talk back, by design. */}
+      <audio ref={proctorAudioRef} autoPlay playsInline />
+
+      {proctorTalking && (
+        <div className="banner talking">
+          🔊 Your proctor is speaking to you.
+          {audioBlocked && (
+            <button className="link-btn" onClick={enableProctorAudio}>
+              Can't hear them? Click to enable sound
+            </button>
+          )}
+        </div>
+      )}
 
       {!document.fullscreenElement && (
         <div className="banner" onClick={() => enterFullscreen()}>

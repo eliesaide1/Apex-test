@@ -23,6 +23,11 @@ const MAX_NEGOTIATION_RETRIES = 2;
  * thumbnails, the mic meter and the talking detector for every candidate at
  * once, and as the fallback when a peer connection can't be established.
  *
+ * Audio is deliberately asymmetric. The candidate's mic is up the whole time
+ * this view is open; the proctor's is not. `startTalk`/`stopTalk` are the
+ * push-to-talk pair — the proctor's voice reaches the candidate only while the
+ * button is held, and the candidate has no way to initiate audio in return.
+ *
  * `wsRef` is the dashboard's existing proctor socket, reused as the signalling
  * channel. Returns the live MediaStream plus a coarse connection state.
  */
@@ -32,6 +37,59 @@ function useLiveFeed(sessionId, wsRef, sendSignal, generation) {
   const [stats, setStats] = useState(null);
   const [reason, setReason] = useState("");     // why it is not live, in words
   const pcRef = useRef(null);
+  // --- push-to-talk ---
+  const micRef = useRef(null);          // the proctor's own mic, acquired lazily
+  const talkSenderRef = useRef(null);   // the sender aimed at the candidate
+  const heldRef = useRef(false);        // is the button down *right now*
+  const [talking, setTalking] = useState(false);
+  const [talkError, setTalkError] = useState("");
+
+  const startTalk = useCallback(async () => {
+    const sender = talkSenderRef.current;
+    if (!sender) { setTalkError("no live connection"); return; }
+    heldRef.current = true;
+    try {
+      if (!micRef.current) {
+        // The opposite treatment to the candidate's capture, and for the
+        // opposite reason: this is speech that has to be intelligible out of a
+        // laptop speaker, not a room recording to analyse, so let the browser
+        // clean it up.
+        micRef.current = await navigator.mediaDevices.getUserMedia({
+          audio: { echoCancellation: true, noiseSuppression: true,
+                   autoGainControl: true },
+        });
+        await sender.replaceTrack(micRef.current.getAudioTracks()[0] || null);
+      }
+      // The permission prompt can outlast a quick tap. Without this check the
+      // mic would come up already released — and stay open, broadcasting.
+      if (!heldRef.current) {
+        micRef.current.getAudioTracks().forEach((t) => { t.enabled = false; });
+        return;
+      }
+      micRef.current.getAudioTracks().forEach((t) => { t.enabled = true; });
+      setTalkError("");
+      setTalking(true);
+      sendSignal({ kind: "rtc-talk", on: true, session_id: sessionId },
+                 { queue: false });
+    } catch (e) {
+      heldRef.current = false;
+      setTalking(false);
+      setTalkError(e?.name === "NotAllowedError"
+        ? "microphone permission denied"
+        : String(e?.message || e).slice(0, 80));
+    }
+  }, [sendSignal, sessionId]);
+
+  const stopTalk = useCallback(() => {
+    heldRef.current = false;
+    // Gag the track rather than dropping it: a disabled track transmits
+    // silence, so the next press is instant instead of waiting on
+    // getUserMedia again. The mic is released outright when this view closes.
+    micRef.current?.getAudioTracks().forEach((t) => { t.enabled = false; });
+    setTalking(false);
+    sendSignal({ kind: "rtc-talk", on: false, session_id: sessionId },
+               { queue: false });
+  }, [sendSignal, sessionId]);
 
   // Poll the browser's own WebRTC stats so picture quality and delay are
   // visible numbers rather than a matter of opinion. This is also what tells
@@ -162,6 +220,19 @@ function useLiveFeed(sessionId, wsRef, sendSignal, generation) {
       for (const c of pending.splice(0)) {
         await pc.addIceCandidate(c).catch(() => {});
       }
+      // Reserve the return direction for push-to-talk before answering. The
+      // candidate's offer already carries a sendrecv audio m-line, so flipping
+      // the transceiver that offer created makes our answer advertise a
+      // proctor->candidate path. No track is attached yet, so nothing is
+      // transmitted until the button is held — and replaceTrack() then needs no
+      // renegotiation. This still pre-adds nothing: it reuses that transceiver.
+      const audioTx = pc.getTransceivers()
+        .find((t) => t.receiver?.track?.kind === "audio");
+      if (audioTx) {
+        try { audioTx.direction = "sendrecv"; } catch { /* older browsers */ }
+        talkSenderRef.current = audioTx.sender;
+      }
+
       const answer = await pc.createAnswer();
       await pc.setLocalDescription(answer);
       send({ kind: "rtc-answer", sdp: pc.localDescription.sdp });
@@ -220,13 +291,21 @@ function useLiveFeed(sessionId, wsRef, sendSignal, generation) {
       send({ kind: "rtc-stop" }, { queue: false });
       try { pcRef.current?.close(); } catch { /* already closed */ }
       pcRef.current = null;
+      // Hand the microphone back. Holding it open between candidates would
+      // leave the browser's recording indicator lit with nowhere to talk to.
+      micRef.current?.getTracks().forEach((t) => t.stop());
+      micRef.current = null;
+      talkSenderRef.current = null;
+      heldRef.current = false;
+      setTalking(false);
+      setTalkError("");
       setStream(null);
       setState("idle");
       setReason("");
     };
   }, [sessionId, wsRef, sendSignal, generation]);
 
-  return { stream, state, stats, reason };
+  return { stream, state, stats, reason, talking, talkError, startTalk, stopTalk };
 }
 
 /** One-line readout of what the live connection is actually delivering. */
@@ -272,19 +351,32 @@ function useAttachStream(stream) {
  * being completely silent. So the rejection is surfaced as `blocked`, and the
  * UI offers a button that calls play() straight from a real click.
  */
-function useAudioSink(stream) {
+function useAudioSink(stream, silence = false) {
   const ref = useRef(null);
   const [blocked, setBlocked] = useState(false);
+  // Read inside the attach effect so a stream that arrives mid-press does not
+  // come up unmuted.
+  const silenceRef = useRef(silence);
+  silenceRef.current = silence;
 
   useEffect(() => {
     const el = ref.current;
     if (!el) return;
     if (el.srcObject !== stream) el.srcObject = stream || null;
     if (!stream) { setBlocked(false); return; }
-    el.muted = false;
+    el.muted = silenceRef.current;
     el.volume = 1;
     el.play().then(() => setBlocked(false)).catch(() => setBlocked(true));
   }, [stream]);
+
+  // Half-duplex, like any push-to-talk radio: while the proctor is speaking,
+  // mute what is coming back. The candidate's capture deliberately runs with
+  // echo cancellation off, so without this the proctor hears their own voice
+  // returned a beat late out of the candidate's speakers.
+  useEffect(() => {
+    const el = ref.current;
+    if (el) el.muted = !!silence;
+  }, [silence]);
 
   const enable = () => {
     const el = ref.current;
@@ -294,6 +386,71 @@ function useAudioSink(stream) {
   };
 
   return { ref, blocked, enable };
+}
+
+/**
+ * Push-to-talk. Held, not toggled: the proctor's mic is open only for as long
+ * as the button is physically down, so it cannot be left on by accident.
+ *
+ * The release listener is on the window, not the button, because a pointer
+ * released after drifting off the button never fires the button's own pointerup
+ * — and that failure mode leaves a proctor broadcasting without knowing it.
+ */
+function TalkButton({ live, className = "" }) {
+  const ready = live?.state === "live";
+  const down = useRef(false);
+
+  const press = (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    if (!ready || down.current) return;
+    down.current = true;
+    live.startTalk();
+  };
+  // `live` is a fresh object on every render, so a release callback that closed
+  // over it would change identity every render — the listener effect below
+  // would re-run, and its cleanup would release the button the moment the press
+  // re-rendered the component. Keeping the latest stopTalk in a ref makes the
+  // callback stable, so the effect mounts once and only cleans up on unmount.
+  const stopRef = useRef(null);
+  stopRef.current = live?.stopTalk;
+
+  const release = useCallback(() => {
+    if (!down.current) return;
+    down.current = false;
+    stopRef.current?.();
+  }, []);
+
+  useEffect(() => {
+    window.addEventListener("pointerup", release);
+    window.addEventListener("pointercancel", release);
+    // Alt-tabbing away with the button held would otherwise never release it.
+    window.addEventListener("blur", release);
+    return () => {
+      window.removeEventListener("pointerup", release);
+      window.removeEventListener("pointercancel", release);
+      window.removeEventListener("blur", release);
+      release();
+    };
+  }, [release]);
+
+  const talking = !!live?.talking;
+  return (
+    <button
+      className={`ghost talk-btn ${talking ? "talking" : ""} ${className}`}
+      disabled={!ready}
+      onPointerDown={press}
+      // Keyboard equivalent, so this is not a mouse-only control.
+      onKeyDown={(e) => { if (e.key === " " || e.key === "Enter") press(e); }}
+      onKeyUp={(e) => { if (e.key === " " || e.key === "Enter") release(); }}
+      title={ready
+        ? "Hold to speak to this candidate — they hear you only while you hold"
+        : "Available once the real-time connection is up"}>
+      <span aria-hidden="true">{talking ? "🔴" : "🎙"}</span>
+      {talking ? " Talking…" : " Hold to talk"}
+      {live?.talkError && <em className="talk-err"> · {live.talkError}</em>}
+    </button>
+  );
 }
 
 /** Mic loudness bar — lets a proctor spot talking without listening in.
@@ -565,6 +722,7 @@ function CameraModal({ session, tick, onClose, live }) {
                 : live?.state === "unavailable" ? "candidate offline"
                 : "snapshot"}
             </span>
+            <TalkButton live={live} />
             <button className="ghost" onClick={goFullscreen}>⛶ Fullscreen</button>
             <button className="ghost" onClick={onClose}>✕ Close</button>
           </div>
@@ -649,7 +807,9 @@ export default function ProctorDashboard() {
   const liveId = expandedId || listeningId;
   const live = useLiveFeed(liveId, wsRef, sendSignal, wsGen);
   // Exactly one element makes sound, whether or not the enlarged view is open.
-  const audio = useAudioSink(live.stream);
+  // Silenced while the proctor is talking, so their own voice cannot come back
+  // through the candidate's speakers.
+  const audio = useAudioSink(live.stream, live.talking);
   // Going live opens the enlarged view too — a 132px thumbnail is not what
   // anyone means by "watch the candidate".
   const goLive = useCallback((id) => {
@@ -758,6 +918,7 @@ export default function ProctorDashboard() {
                 🔇 Sound blocked — click to enable
               </button>
             )}
+            <TalkButton live={live} className="chip-talk" />
             {!expandedId && (
               <button className="ghost listen-stop"
                       onClick={() => setExpandedId(liveId)}>Show video</button>

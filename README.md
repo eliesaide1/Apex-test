@@ -17,8 +17,10 @@ React (Vite) SPA ──HTTP/JSON──> FastAPI backend ──> SQLite (sessions
    │  webcam snapshots ─────────────────────┤        ├── analyze_snapshot() stub (Phase 3: YOLO + MediaPipe)
    │  microphone clips ─────────────────────┘        └── analyze_audio() — flags sustained talking
    │
-   └─ WebRTC ═══════════════════════════════════════════> Proctor dashboard
+   └─ WebRTC <══════════════════════════════════════════> Proctor dashboard
       real-time video + audio, PEER-TO-PEER (never touches the server).
+      Candidate -> proctor: always, while watched.
+      Proctor -> candidate: voice only while push-to-talk is HELD.
       The server only relays SDP/ICE: /ws/candidate <-> /ws/proctor.
 ```
 
@@ -54,6 +56,39 @@ candidate at the same moment: **2.9s** stale video, **1.8s** audio.
 Only one candidate streams at a time — each live view costs that candidate an
 upstream video stream, and overlapping mics are unusable. The enlarged view and
 the Listen button share a single peer connection.
+
+**Talking back — push-to-talk.** Audio is deliberately asymmetric. The
+candidate's mic is up the whole time you are watching them; yours is not.
+**Hold** 🎙 *Hold to talk* (in the enlarged view or the header chip) and the
+candidate hears you for exactly as long as the button is down. Release it and
+they hear nothing. The candidate has no equivalent control and cannot initiate
+audio — they can only be spoken to.
+
+That guarantee is structural, not cosmetic. Until you press, the proctor→
+candidate direction carries **no track at all**: answering the offer reserves
+the direction in SDP, and the mic is attached later with `replaceTrack()`, so
+there is nothing to leak. Releasing disables the track, which transmits digital
+silence. Measured end-to-end on the candidate's own audio element: RMS `0.0000`
+before the press, `0.0322` while held, `0.0000` after release. Only the proctor
+**currently watching** that candidate may talk into their room — a second
+signed-in proctor's `rtc-talk` is dropped by the server.
+
+Two consequences worth knowing:
+
+- **It is half-duplex, like a radio.** While you hold the button the
+  candidate's incoming audio is muted, because their capture runs with echo
+  cancellation off (see below) and you would otherwise hear yourself returned a
+  beat late off their speakers.
+- **It cannot make the candidate's own talking detection fire.** Clips the
+  candidate records while you are speaking arrive marked `suppress`; the
+  backend keeps them for listen-in but takes no verdict from them and does not
+  let them train the room's noise floor. Without this, talking to a candidate
+  would flag that candidate for talking.
+
+The candidate sees a green *"Your proctor is speaking to you"* banner while you
+hold, so the voice is never disembodied. Push-to-talk needs the live view open —
+it rides the same peer connection — so it is not a way to reach a candidate you
+are not watching. For that, use ✉ **Message** (text, must be acknowledged).
 
 **NAT traversal.** STUN alone (the default) covers most home and office
 networks. It is *not* enough behind symmetric NAT or strict corporate
@@ -110,7 +145,7 @@ note at the bottom of `proctoring.py`.
 - **Phase 2b (done):** Microphone capture, proctor listen-in, and adaptive
   talking detection (`analyze_audio`).
 - **Phase 2c (done):** Real-time peer-to-peer video + audio (WebRTC) for the
-  candidate a proctor is actively watching.
+  candidate a proctor is actively watching, plus proctor push-to-talk back.
 - **Phase 3 (stub):** Swap the backend `analyze_snapshot` stub for real CV
   (YOLO for phone/second-person, MediaPipe for gaze/face-presence). Optionally
   add speaker diarization so `analyze_audio` can name a *second speaker*.

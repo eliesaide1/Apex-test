@@ -214,6 +214,19 @@ def classify_voice(session_id: str, level: float) -> tuple[bool, float, bool]:
     return speaking, threshold, False
 
 
+def voice_threshold(session_id: str) -> float:
+    """The current speech threshold for this candidate, without judging a clip.
+
+    classify_voice() has side effects (it counts calibration clips and learns
+    the noise floor), so a caller that only wants to *report* the threshold —
+    e.g. a clip recorded while the proctor was talking, which must not train
+    anything — asks here instead.
+    """
+    from . import proctoring
+
+    return proctoring.speech_threshold(_voice_floor.get(session_id))
+
+
 def note_voice(session_id: str, speaking: bool) -> bool:
     """Track consecutive speech clips.
 

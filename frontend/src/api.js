@@ -69,12 +69,15 @@ export async function sendSnapshot(sessionId, blob) {
 }
 
 // Upload one short mic clip (near-live listen-in for the proctor).
-export async function sendAudio(sessionId, blob, level, ms) {
+export async function sendAudio(sessionId, blob, level, ms, suppress = false) {
   try {
     const fd = new FormData();
     fd.append("session_id", sessionId);
     fd.append("level", String(level));
     fd.append("ms", String(ms));
+    // Set when the proctor was talking over this clip, so the backend keeps it
+    // for listen-in but takes no talking verdict from it — see useWebcam.
+    fd.append("suppress", suppress ? "1" : "0");
     fd.append("clip", blob, "clip.webm");
     await fetch(`${BASE}/api/audio`, {
       method: "POST", headers: { ...candidateAuth() }, body: fd,

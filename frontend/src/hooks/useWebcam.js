@@ -33,8 +33,13 @@ function pickAudioMime() {
  *   camStatus, micStatus — "idle" | "live" | "denied" | "error" | "off"
  *   camOn, micOn         — booleans for gating
  *   micLevel             — 0..1 live loudness, for the candidate's own meter
+ *
+ * `talkRef` (optional) is the shared {on, lastAt} record of proctor push-to-talk
+ * kept by useLiveStream. A clip recorded while the proctor was speaking is
+ * mostly their voice coming back off the candidate's speakers, so it is uploaded
+ * marked `suppress` and the backend takes no talking verdict from it.
  */
-export function useWebcam(sessionId, { intervalMs = 3000 } = {}) {
+export function useWebcam(sessionId, { intervalMs = 3000, talkRef } = {}) {
   const videoRef = useRef(null);
   const canvasRef = useRef(null);
   const [camStatus, setCamStatus] = useState("idle");
@@ -199,7 +204,14 @@ export function useWebcam(sessionId, { intervalMs = 3000 } = {}) {
         rec.onstop = () => {
           const blob = new Blob(parts, { type: rec.mimeType || mime });
           if (blob.size && !stopped && !cancelled) {
-            sendAudio(sessionId, blob, n ? sum / n : 0, Date.now() - startedAt);
+            // Contaminated if the proctor was talking at ANY point during the
+            // clip, not just as it ended — a 4s clip overlapping one second of
+            // proctor speech is already unusable as evidence of the candidate
+            // talking. `lastAt` marks the most recent press or release.
+            const talk = talkRef?.current;
+            const suppress = !!talk && (talk.on || talk.lastAt >= startedAt);
+            sendAudio(sessionId, blob, n ? sum / n : 0, Date.now() - startedAt,
+                      suppress);
           }
           recordOne();
         };

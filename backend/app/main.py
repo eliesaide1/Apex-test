@@ -127,6 +127,15 @@ class Signalling:
     def is_live(self, session_id: str) -> bool:
         return session_id in self._candidates
 
+    def is_watcher(self, session_id: str, ws: WebSocket) -> bool:
+        """True if this proctor is the one currently watching that candidate.
+
+        Push-to-talk is audible in the candidate's room, so it is gated on
+        actually watching them — a second signed-in proctor must not be able to
+        speak into a session they are not on.
+        """
+        return self._watchers.get(session_id) is ws
+
     # --- routing ----------------------------------------------------------- #
     async def _send(self, ws: WebSocket | None, message: dict) -> bool:
         if ws is None:
@@ -259,6 +268,7 @@ async def audio(
     session_id: str = Form(...),
     level: float = Form(0.0),
     ms: int = Form(0),
+    suppress: int = Form(0),
     clip: UploadFile = File(...),
     token: dict = Depends(require_candidate),
 ):
@@ -274,8 +284,19 @@ async def audio(
 
     data = await clip.read()
     lvl = min(1.0, max(0.0, level))
-    # Threshold adapts to this candidate's own room noise (see store.classify_voice).
-    speaking, threshold, calibrating = store.classify_voice(session_id, lvl)
+    if suppress:
+        # The proctor was holding push-to-talk while this clip was recording, so
+        # the candidate's mic is largely carrying the proctor's own voice back
+        # out of their speakers. Judging it would flag the candidate for the
+        # proctor's talking, and letting it train the noise floor would blunt
+        # detection afterwards. Keep the clip — it is still worth listening to —
+        # but take no verdict from it, and break any run in progress.
+        speaking, calibrating = False, False
+        threshold = store.voice_threshold(session_id)
+        store.note_voice(session_id, False)
+    else:
+        # Threshold adapts to this candidate's own room noise (see store.classify_voice).
+        speaking, threshold, calibrating = store.classify_voice(session_id, lvl)
     saved = store.add_audio(session_id, data, clip.content_type or "audio/webm",
                             lvl, ms, speaking)
     if saved is None:
@@ -283,7 +304,7 @@ async def audio(
 
     # One flag per talking episode, not one per clip (store tracks the run), and
     # nothing at all while the room baseline is still being learned.
-    sustained = (not calibrating) and store.note_voice(session_id, speaking)
+    sustained = (not suppress) and (not calibrating) and store.note_voice(session_id, speaking)
     detections = analyze_audio(data, lvl, sustained)
     for det in detections:
         f = store.Flag(type=det["type"], detail=det.get("detail"),
@@ -294,7 +315,7 @@ async def audio(
 
     return {"ok": True, "seq": saved.seq, "speaking": speaking,
             "threshold": round(threshold, 3), "calibrating": calibrating,
-            "detections": detections}
+            "suppressed": bool(suppress), "detections": detections}
 
 
 @app.get("/api/audio/{session_id}")
@@ -529,6 +550,15 @@ async def ws_proctor(ws: WebSocket, token: str | None = None):
             elif kind in ("rtc-answer", "rtc-ice"):
                 # Pass the proctor's answer / ICE straight to that candidate.
                 await signalling.to_candidate(sid, {**msg, "kind": kind})
+            elif kind == "rtc-talk":
+                # Push-to-talk: the proctor is holding (or has released) the
+                # talk button. The audio itself rides the peer connection; this
+                # only tells the candidate to show "your proctor is speaking"
+                # and to stop counting their own mic as talking while the
+                # proctor's voice is coming out of their speakers.
+                if signalling.is_watcher(sid, ws):
+                    await signalling.to_candidate(
+                        sid, {"kind": "rtc-talk", "on": bool(msg.get("on"))})
     except WebSocketDisconnect:
         pass
     finally:
