@@ -54,6 +54,15 @@ def init() -> None:
                 ts         REAL NOT NULL
             );
             CREATE INDEX IF NOT EXISTS idx_flags_session ON flags(session_id);
+            -- Candidates a proctor threw out. Keyed by a normalised name
+            -- because that (plus the shared exam code) is the only identity
+            -- this app has; a removal that a new login could undo would not be
+            -- a removal at all.
+            CREATE TABLE IF NOT EXISTS removals (
+                name_key       TEXT PRIMARY KEY,
+                candidate_name TEXT NOT NULL,
+                removed_at     REAL NOT NULL
+            );
             CREATE TABLE IF NOT EXISTS answers (
                 session_id  TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
                 question_id TEXT NOT NULL,

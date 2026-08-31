@@ -87,7 +87,12 @@ function boostStartBitrate(sdp, { start = 1500, min = 600, max = 2500 } = {}) {
  * recorded while the proctor was speaking are not judged as the candidate
  * talking (see useWebcam).
  */
-export function useLiveStream(sessionId, streamRef, streamReady, pausedRef, talkRef) {
+export function useLiveStream(sessionId, streamRef, streamReady, pausedRef,
+                              talkRef, onRemoved) {
+  // Ref, not a dependency: this callback is recreated every render by the
+  // caller, and rebuilding the socket on each render would be ruinous.
+  const onRemovedRef = useRef(onRemoved);
+  onRemovedRef.current = onRemoved;
   const [live, setLive] = useState(false);
   // The proctor's voice. Rendered by the exam page as a plain <audio>.
   const proctorAudioRef = useRef(null);
@@ -222,6 +227,12 @@ export function useLiveStream(sessionId, streamRef, streamReady, pausedRef, talk
             .catch(() => {});
         } else if (msg.kind === "rtc-ice" && pc && msg.candidate) {
           await pc.addIceCandidate(msg.candidate).catch(() => {});
+        } else if (msg.kind === "session-removed") {
+          // The proctor threw us out. The heartbeat would notice within a few
+          // seconds anyway, but the candidate should not get to keep answering
+          // in the meantime.
+          closePeer();
+          onRemovedRef.current?.();
         } else if (msg.kind === "rtc-talk") {
           setTalking(!!msg.on);
           // A track that arrived while playback was blocked stays silent until

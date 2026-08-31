@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   fetchSessions, fetchAnswers, fetchFlags, dismissFlag, clearFlags,
   deleteSession, sendCandidateMessage, snapshotUrl,
+  fetchRemovals, restoreCandidate,
   fetchRtcConfig,
   proctorLogin, getProctorToken, setProctorToken,
 } from "../api";
@@ -751,6 +752,32 @@ function CameraModal({ session, tick, onClose, live }) {
   );
 }
 
+/**
+ * Everyone a proctor has thrown out. They are barred from starting the exam
+ * again, so this list is also the only way to undo that — a removal made by
+ * mistake would otherwise be permanent.
+ */
+function RemovedPanel({ removals, onRestore }) {
+  if (!removals.length) return null;
+  return (
+    <section className="feedwrap removed-panel">
+      <h2>Removed from the exam <span className="muted">· cannot rejoin</span></h2>
+      <ul className="removed-list">
+        {removals.map((r) => (
+          <li key={r.name_key}>
+            <strong>{r.candidate_name}</strong>
+            <span className="muted small">removed {fmtTime(r.removed_at)}</span>
+            <button className="ghost" onClick={() => onRestore(r)}
+                    title="Let this person start the exam again, from question 1">
+              Allow back in
+            </button>
+          </li>
+        ))}
+      </ul>
+    </section>
+  );
+}
+
 /** Drop-off timeline: when the candidate left the exam view and for how long. */
 function Dropoffs({ dropoffs }) {
   if (!dropoffs.length) return <div className="muted small">No drop-offs.</div>;
@@ -779,6 +806,13 @@ export default function ProctorDashboard() {
   const [answersId, setAnswersId] = useState(null);     // candidate answers shown
   const [warningsId, setWarningsId] = useState(null);   // candidate warnings shown
   const [listeningId, setListeningId] = useState(null); // candidate streamed live
+  const [removals, setRemovals] = useState([]);         // thrown out, cannot rejoin
+
+  const loadRemovals = useCallback(
+    () => fetchRemovals().then((d) => setRemovals(d.removals || []))
+                         .catch(() => {}),
+    [],
+  );
 
   const load = useCallback(
     () => fetchSessions().then(setSessions).catch((e) => {
@@ -791,10 +825,13 @@ export default function ProctorDashboard() {
   // not exam events, so they must not trigger a session reload.
   const onSignal = useCallback((e) => {
     try {
-      if (String(JSON.parse(e.data).kind || "").startsWith("rtc-")) return;
+      const kind = String(JSON.parse(e.data).kind || "");
+      if (kind.startsWith("rtc-")) return;
+      // Another proctor removed someone — refresh both lists, not just one.
+      if (kind === "session-removed") loadRemovals();
     } catch { /* fall through and reload */ }
     load();
-  }, [load]);
+  }, [load, loadRemovals]);
 
   // Owns the socket: pings it, reconnects it, and queues sends across the gap.
   const { wsRef, send: sendSignal, generation: wsGen, connected: wsConnected } =
@@ -828,7 +865,10 @@ export default function ProctorDashboard() {
     });
   }, []);
 
-  const refresh = () => fetchSessions().then(setSessions).catch(() => {});
+  const refresh = () => {
+    fetchSessions().then(setSessions).catch(() => {});
+    loadRemovals();
+  };
 
   const expanded = sessions.find((s) => s.session_id === expandedId) || null;
   const answersSession = sessions.find((s) => s.session_id === answersId) || null;
@@ -860,15 +900,32 @@ export default function ProctorDashboard() {
   }
 
   async function removeCandidate(s) {
+    // Spell out that this ends their exam. It is no longer just a tidy-up of
+    // the dashboard: they are ejected from the page and barred from returning.
     if (!window.confirm(
-      `Remove ${s.candidate_name}? This permanently deletes their answers, ` +
-      `flags, and camera frame.`)) return;
+      `Remove ${s.candidate_name} from the exam?\n\n` +
+      `They are thrown out immediately and cannot start the exam again. ` +
+      `Their answers, flags and camera frame are permanently deleted.\n\n` +
+      `You can undo this from the "Removed from the exam" list below.`)) return;
     try {
       await deleteSession(s.session_id);
       setSessions((prev) => prev.filter((x) => x.session_id !== s.session_id));
       if (answersId === s.session_id) setAnswersId(null);
       if (expandedId === s.session_id) setExpandedId(null);
-    } catch { /* ignore */ }
+      if (warningsId === s.session_id) setWarningsId(null);
+      // Removing whoever is on screen must also drop the live view, or the
+      // dashboard sits negotiating with a session that no longer exists.
+      if (liveId === s.session_id) stopLive();
+      loadRemovals();
+    } catch { window.alert("Could not remove this candidate."); }
+  }
+
+  async function allowBackIn(r) {
+    if (!window.confirm(
+      `Let ${r.candidate_name} back in? They can start the exam again, ` +
+      `beginning at the first question.`)) return;
+    try { await restoreCandidate(r.name_key); loadRemovals(); }
+    catch { window.alert("Could not restore this candidate."); }
   }
 
   // Presence and camera frames come from HTTP polling; the socket (above) only
@@ -877,10 +934,11 @@ export default function ProctorDashboard() {
   useEffect(() => {
     if (!authed) return;
     load();
+    loadRemovals();
     const poll = setInterval(load, 3000);          // refresh presence + drop-offs
     const cam = setInterval(() => setTick((t) => t + 1), 2500); // refresh camera frames
     return () => { clearInterval(poll); clearInterval(cam); };
-  }, [authed, load]);
+  }, [authed, load, loadRemovals]);
 
   if (!authed) return <ProctorLogin onAuthed={() => setAuthed(true)} />;
 
@@ -1033,6 +1091,8 @@ export default function ProctorDashboard() {
           ))}
         </ul>
       </section>
+
+      <RemovedPanel removals={removals} onRestore={allowBackIn} />
 
       {/* The one element that makes sound. Every <video> on this page is muted
           so audio can never double up or be lost between views. */}

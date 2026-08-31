@@ -13,11 +13,16 @@ import { sendFlag, heartbeat } from "../api";
  * native/kiosk wrapper (Electron/Tauri) — the webcam AI (Phase 3) is what
  * actually catches that class of cheating.
  */
-export function useProctoring(sessionId, { maxWarnings = 5, onForceSubmit, active = true } = {}) {
+export function useProctoring(sessionId, { maxWarnings = 5, onForceSubmit,
+                                            onRemoved, active = true } = {}) {
   const [warnings, setWarnings] = useState(0);
   const [lastEvent, setLastEvent] = useState(null);
   const warnRef = useRef(0);
   const awayAtRef = useRef(null);   // when the candidate left the exam view
+  // Held in a ref so a caller passing a fresh closure each render cannot tear
+  // down and rebuild every listener in this hook.
+  const onRemovedRef = useRef(onRemoved);
+  onRemovedRef.current = onRemoved;
 
   // Kept current every render so the listeners (attached once) see live state
   // without re-subscribing. Navigation guards only count while `active`, i.e.
@@ -106,9 +111,16 @@ export function useProctoring(sessionId, { maxWarnings = 5, onForceSubmit, activ
       }
     };
 
-    // Heartbeat so the proctor dashboard can tell "online" from "dropped off".
-    heartbeat(sessionId);
-    const hb = setInterval(() => heartbeat(sessionId), 5000);
+    // Heartbeat so the proctor dashboard can tell "online" from "dropped off",
+    // and so we notice if the proctor has removed us. `ok: false` means the
+    // server no longer has this session; null means the network hiccuped and
+    // is deliberately ignored.
+    const beat = async () => {
+      const res = await heartbeat(sessionId);
+      if (res && res.ok === false) onRemovedRef.current?.();
+    };
+    beat();
+    const hb = setInterval(beat, 5000);
 
     document.addEventListener("visibilitychange", onVisibility);
     window.addEventListener("blur", onBlur);

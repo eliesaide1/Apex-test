@@ -65,16 +65,29 @@ export default function Exam() {
   // Publishes the same tracks peer-to-peer when a proctor opens the live view,
   // and pauses snapshot uploads while it does so they don't fight for uplink.
   // Also plays the proctor's voice, but only while they hold their talk button.
+  // Removed by a proctor: drop the stored session so a reload cannot resurrect
+  // the exam, then leave the route entirely, which unmounts the hooks above and
+  // hands back the camera and mic.
+  const removedRef = useRef(false);
+  const onRemoved = useCallback(() => {
+    if (removedRef.current) return;      // socket and heartbeat may both fire
+    removedRef.current = true;
+    sessionStorage.removeItem("session");
+    sessionStorage.removeItem("result");
+    nav("/removed", { replace: true });
+  }, [nav]);
+
   const { live, proctorAudioRef, proctorTalking, audioBlocked,
           enableProctorAudio } = useLiveStream(sid, streamRef, streamReady,
-                                               pausedRef, talkRef);
+                                               pausedRef, talkRef, onRemoved);
   const mediaReady = camOn && micOn;
   // Only start counting navigation warnings once the exam is truly active
   // (camera + mic granted). This avoids false flags from the startup
   // permission prompt and fullscreen transition.
   const { warnings, lastEvent, maxWarnings } = useProctoring(
     sid, { maxWarnings: 6, active: mediaReady,
-           onForceSubmit: (t) => doSubmit(`auto-submitted: ${t}`) }
+           onForceSubmit: (t) => doSubmit(`auto-submitted: ${t}`),
+           onRemoved }
   );
 
   // Notify the proctor whenever the camera or mic drops or returns mid-exam.

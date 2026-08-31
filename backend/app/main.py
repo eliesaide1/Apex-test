@@ -152,6 +152,24 @@ class Signalling:
     async def to_watcher(self, session_id: str, message: dict) -> bool:
         return await self._send(self._watchers.get(session_id), message)
 
+    async def evict_candidate(self, session_id: str) -> bool:
+        """Tell a candidate their exam is over, then hang up.
+
+        Sending is not enough on its own — the socket reconnects — but the
+        session is gone by the time this runs, so the retry is refused at the
+        door. This just makes the ejection immediate instead of waiting for the
+        next heartbeat to come back empty.
+        """
+        ws = self._candidates.pop(session_id, None)
+        if ws is None:
+            return False
+        await self._send(ws, {"kind": "session-removed"})
+        try:
+            await ws.close(code=1000)
+        except Exception:
+            pass
+        return True
+
     async def watch(self, session_id: str, proctor: WebSocket) -> bool:
         """A proctor asks to see one candidate live. Only one watcher per
         candidate: a second proctor taking over simply replaces the first."""
@@ -213,6 +231,12 @@ async def login(req: LoginRequest):
         raise HTTPException(status_code=403, detail="Invalid exam code")
     if not req.name.strip():
         raise HTTPException(status_code=400, detail="Name required")
+    # A removal a fresh login could undo would be no removal at all.
+    if store.is_blocked(req.name):
+        raise HTTPException(
+            status_code=403,
+            detail="A proctor ended your exam. You cannot start it again — "
+                   "speak to your proctor if you think this is a mistake.")
 
     session = store.create_session(req.name.strip(), exam_data.EXAM["id"])
     token = make_token("candidate", session.id, config.CANDIDATE_TOKEN_TTL)
@@ -471,9 +495,38 @@ async def send_message(req: MessageRequest, _: dict = Depends(require_proctor)):
 
 @app.delete("/api/sessions/{session_id}")
 async def delete_session(session_id: str, _: dict = Depends(require_proctor)):
-    """Proctor: remove a candidate (and their flags, answers, camera frame)."""
-    if not store.delete_session(session_id):
+    """Proctor: throw a candidate out of the exam.
+
+    Removal has to end the exam, not just erase the record: deleting the row
+    alone left the candidate's page happily running on the questions it already
+    had, with its uploads failing silently. So we also bar the name from
+    starting again and hang up on their socket, and their next heartbeat comes
+    back `ok: false`, which their page treats as an ejection.
+    """
+    session = store.get_session(session_id)
+    if session is None or not store.delete_session(session_id):
         raise HTTPException(status_code=404, detail="Unknown session")
+
+    store.block_candidate(session.candidate_name)
+    await signalling.evict_candidate(session_id)
+    # Other proctors' dashboards are watching this socket; without it the card
+    # lingers on their screens until the next poll.
+    await hub.broadcast({"kind": "session-removed", "session_id": session_id,
+                         "candidate_name": session.candidate_name})
+    return {"ok": True, "removed_name": session.candidate_name}
+
+
+@app.get("/api/removals")
+async def list_removals(_: dict = Depends(require_proctor)):
+    """Proctor: who has been thrown out and cannot start the exam again."""
+    return {"removals": store.removals()}
+
+
+@app.delete("/api/removals/{name_key}")
+async def restore_candidate(name_key: str, _: dict = Depends(require_proctor)):
+    """Proctor: let a removed candidate back in — they start a fresh exam."""
+    if not store.unblock_candidate(name_key):
+        raise HTTPException(status_code=404, detail="Not on the removed list")
     return {"ok": True}
 
 

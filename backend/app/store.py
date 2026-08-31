@@ -334,6 +334,43 @@ def pop_messages(session_id: str) -> list[dict]:
     return _messages.pop(session_id, [])
 
 
+def name_key(name: str) -> str:
+    """The identity a removal is remembered by.
+
+    Candidates type their own name, so match it the way a person reading the
+    list would: case-insensitive, and indifferent to stray whitespace. This is
+    a deterrent, not proof of identity — someone determined can type a
+    different name, which is exactly the limit the README describes and what
+    per-candidate accounts would fix.
+    """
+    return " ".join(name.split()).casefold()
+
+
+def block_candidate(name: str) -> None:
+    """Bar this name from starting the exam again."""
+    db.execute(
+        "INSERT OR REPLACE INTO removals (name_key, candidate_name, removed_at) "
+        "VALUES (?, ?, ?)",
+        (name_key(name), " ".join(name.split()), time.time()),
+    )
+
+
+def is_blocked(name: str) -> bool:
+    return db.query_one("SELECT 1 FROM removals WHERE name_key=?",
+                        (name_key(name),)) is not None
+
+
+def unblock_candidate(key: str) -> bool:
+    """Let a removed candidate back in (the proctor removed them by mistake)."""
+    return db.execute("DELETE FROM removals WHERE name_key=?", (key,)).rowcount > 0
+
+
+def removals() -> list[dict]:
+    rows = db.query("SELECT name_key, candidate_name, removed_at FROM removals "
+                    "ORDER BY removed_at DESC")
+    return [dict(r) for r in rows]
+
+
 def delete_session(session_id: str) -> bool:
     """Remove a session and (via FK cascade) its flags and answers."""
     _snapshots.pop(session_id, None)

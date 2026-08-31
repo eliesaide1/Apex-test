@@ -379,6 +379,19 @@ video.modal-img { display: block; }
   border-color: var(--warn); font-weight: 600; }
 .sound-blocked:hover { background: #ffc266; border-color: #ffc266; }
 
+/* Removed candidates — barred from rejoining until a proctor undoes it. */
+.removed-panel h2 { display: flex; align-items: baseline; gap: 8px; }
+.removed-list { list-style: none; padding: 0; margin: 0; }
+.removed-list li { display: flex; align-items: center; gap: 12px;
+  padding: 10px 14px; border: 1px solid var(--line); border-radius: 10px;
+  background: var(--panel); margin-bottom: 8px; }
+.removed-list li .muted { margin-right: auto; }
+.removed-list li strong { color: var(--text); }
+
+/* The candidate's own ejection screen. */
+.removed-card { text-align: center; max-width: 460px; }
+.removed-card h1 { margin: 8px 0 12px; }
+
 /* live feed */
 .feedwrap { max-width: 1200px; margin: 0 auto; padding: 0 20px 40px; }
 .feed { list-style: none; margin: 0; padding: 0; }

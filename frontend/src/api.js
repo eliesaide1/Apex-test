@@ -100,15 +100,29 @@ export async function fetchMessages(sessionId) {
   }
 }
 
+/**
+ * Liveness ping — and the candidate's fallback way of learning they have been
+ * removed, for when the signalling socket is down.
+ *
+ * The distinction that matters: a *network* failure returns null and must be
+ * ignored (a dropped wifi packet is not an ejection), whereas the server
+ * answering `ok: false` — or refusing the token outright — means it no longer
+ * has this session, which only happens once a proctor has removed it.
+ */
 export async function heartbeat(sessionId) {
   try {
     const fd = new FormData();
     fd.append("session_id", sessionId);
-    await fetch(`${BASE}/api/heartbeat`, {
+    const r = await fetch(`${BASE}/api/heartbeat`, {
       method: "POST", headers: { ...candidateAuth() }, body: fd,
     });
+    if (r.status === 401 || r.status === 403 || r.status === 404) {
+      return { ok: false };
+    }
+    if (!r.ok) return null;             // 5xx — the server is unwell, not us
+    return await r.json();
   } catch {
-    /* best-effort */
+    return null;                        // offline; say nothing
   }
 }
 
@@ -169,6 +183,23 @@ export async function sendCandidateMessage(sessionId, text) {
 }
 
 // Proctor: permanently remove a candidate (session, flags, answers, frame).
+export async function fetchRemovals() {
+  const r = await fetch(`${BASE}/api/removals`, {
+    headers: { Authorization: `Bearer ${getProctorToken()}` },
+  });
+  if (!r.ok) throw new Error("Could not load the removed list");
+  return r.json();
+}
+
+export async function restoreCandidate(nameKey) {
+  const r = await fetch(`${BASE}/api/removals/${encodeURIComponent(nameKey)}`, {
+    method: "DELETE",
+    headers: { Authorization: `Bearer ${getProctorToken()}` },
+  });
+  if (!r.ok) throw new Error("Could not restore");
+  return r.json();
+}
+
 export async function deleteSession(sessionId) {
   const r = await fetch(`${BASE}/api/sessions/${sessionId}`, {
     method: "DELETE",

@@ -34,6 +34,33 @@ single HTTPS origin (no CORS, no hardcoded backend URL, webcam works).
 - **Proctor:** signs in with a **proctor password** to reach the dashboard. The session
   list, live webcam frames, and the proctor WebSocket all require a proctor token.
 
+### Removing a candidate
+
+✕ **Remove** on a candidate's card ends their exam — it is not a tidy-up of the
+dashboard. Deleting the record alone used to leave their page running happily on
+the questions it had already downloaded, with every upload failing silently, so
+removal now does three things:
+
+1. **Ejects them.** The server hangs up on their socket with `session-removed`
+   and their page leaves the exam route, which unmounts it — releasing the
+   camera and microphone and taking the questions out of the page rather than
+   covering them up. If that socket is down, their next heartbeat comes back
+   `ok: false` and does the same thing within five seconds. A *network* failure
+   returns nothing and is ignored: a dropped packet must not eject anyone.
+2. **Deletes everything** — answers, flags, camera frame, audio buffer.
+3. **Bars them from starting again**, matched on a normalised name (case- and
+   spacing-insensitive), because a removal that a fresh login could undo would
+   not be a removal.
+
+Removals are listed under **Removed from the exam** on the dashboard, each with
+**Allow back in** — the only way to reverse one, and necessary because the block
+is otherwise permanent. Someone let back in starts a **new** attempt from
+question 1; the removed one is gone.
+
+The block is a deterrent, not proof of identity: names are typed, so a
+determined person can enter a different one. That is the same limit the shared
+exam code has, and per-candidate accounts are the fix (see *Next steps*).
+
 Tokens are HMAC-signed with `SECRET_KEY` (no external JWT dependency).
 
 ## Live monitoring — two layers
